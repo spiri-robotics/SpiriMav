@@ -55,6 +55,19 @@ MAVLink-specific `MavRobot`.
 - **`gcs_seen` is best-effort display only.** ArduPilot forwards broadcast
   messages like `HEARTBEAT` between links, so QGC's heartbeat usually reaches
   the companion; PX4 needs `MAV_x_FORWARD`. It never feeds a safety decision.
+- **`Robot` is a `Position`** in SpiriSynq's frame tree, so payloads mount on it
+  with `relative_to=Link.to(robot)`. `MavRobot` hangs under the EKF origin
+  (`ECEF → <robot>_origin → <robot>`): `LOCAL_POSITION_NED` and
+  `ATTITUDE_QUATERNION` go into its mount unconverted, `GPS_GLOBAL_ORIGIN`
+  places the origin, and everything below the origin works without GPS. Body
+  frames are FRD.
+- **`failsafe` is published only while `system_status` is CRITICAL or
+  EMERGENCY** (which is how ArduPilot reports "any failsafe"); failsafe
+  `STATUSTEXT`s only say which kind, defaulting to `other`.
+- **`roi` echoes what we set, not what the FCU is doing.** No MAVLink message
+  reports the active region of interest, so `Robot.roi` is the last ROI
+  `set_roi` got accepted, dropped by `clear_roi` or a reconnect. An ROI from
+  QGC or a mission doesn't show, and ours may already have been replaced.
 - **Intent flows in as `@remote_method` RPCs** (`arm`, `set_mode`, `goto`,
   ...), never as field writes from mirrors: RPCs are acknowledged and can
   refuse. They act alongside QGC with no arbitration, as two GCSs on one

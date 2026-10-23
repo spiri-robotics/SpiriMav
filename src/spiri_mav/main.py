@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import sys
+import threading
 from pathlib import Path
 
+import zenoh
 from loguru import logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from SpiriSynq.link import Link
+from SpiriSynq.session import Session, current_session
 
 from spiri_mav import __version__
 
@@ -25,6 +30,15 @@ class Settings(BaseSettings):
     environment: str = "development"
     debug: bool = False
 
+    mavlink_url: str = "tcp:127.0.0.1:5760"  # pymavlink connection string; ArduPilot SITL's default
+    sysid: int = 254                         # ours: must not be the FCU's GCS sysid (docs/design.md)
+    target_sysid: int = 1                    # the autopilot's
+    topic: str = "robot"                     # SpiriSynq topic, under this host's base topic
+    zenoh_connect: str | None = None         # e.g. tcp/127.0.0.1:7447: join via that router as a client
+    # Which SpiriCamera cameras each gimbal carries, by gimbal device id: MAVLink
+    # doesn't say. JSON in the environment, e.g. {"1": ["mu-1/camera_eo"]}.
+    gimbal_cameras: dict[int, list[str]] = {}
+
 
 def setup_logging(level: str = "INFO") -> None:
     """Configure loguru logging."""
@@ -41,10 +55,9 @@ def get_settings() -> Settings:
     return Settings()
 
 
-def main() -> None:
-    """Main entry point."""
-    settings = get_settings()
-    setup_logging(level="DEBUG" if settings.debug else "INFO")
+def serve(settings: Settings, stop: threading.Event | None = None) -> None:
+    """Bridge the autopilot at ``settings.mavlink_url`` to SpiriSynq until *stop* or Ctrl-C."""
+    from spiri_mav.mav_robot import MavRobot
 
     logger.info(
         "Starting {} v{} [environment: {}]",
@@ -52,9 +65,35 @@ def main() -> None:
         settings.version,
         settings.environment,
     )
+    if settings.zenoh_connect:
+        config = zenoh.Config()
+        config.insert_json5("mode", '"client"')
+        config.insert_json5("connect/endpoints", json.dumps([settings.zenoh_connect]))
+        current_session.set(Session(config=config))
+    robot = MavRobot(
+        settings.topic,
+        synq_authoritive=True,
+        sysid=settings.sysid,
+        target_sysid=settings.target_sysid,
+        _gimbal_cameras={
+            device_id: tuple(Link(topic) for topic in topics)
+            for device_id, topics in settings.gimbal_cameras.items()
+        },
+    )
+    logger.info("Publishing robot at {}", robot.synq_absolute_path)
+    try:
+        robot.run(settings.mavlink_url, stop=stop)
+    except KeyboardInterrupt:
+        logger.info("Stopping")
+    finally:
+        robot.close()
 
-    # Add your main application logic here
-    logger.info("{} is running", settings.app_name)
+
+def main() -> None:
+    """Main entry point."""
+    settings = get_settings()
+    setup_logging(level="DEBUG" if settings.debug else "INFO")
+    serve(settings)
 
 
 if __name__ == "__main__":

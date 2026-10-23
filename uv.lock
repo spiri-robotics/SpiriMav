@@ -1296,7 +1296,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "pymavlink", specifier = ">=2.4.50" },
     { name = "sphinx", marker = "extra == 'docs'", specifier = ">=9.1.0" },
-    { name = "spirisynq", specifier = ">=0.4.0" },
+    { name = "spirisynq", editable = "../SpiriSynq" },
     { name = "typer", specifier = ">=0.26.8" },
 ]
 provides-extras = ["docs"]
@@ -1312,7 +1312,7 @@ dev = [
 [[package]]
 name = "spirisynq"
 version = "0.4.0"
-source = { registry = "https://pypi.org/simple" }
+source = { editable = "../SpiriSynq" }
 dependencies = [
     { name = "click" },
     { name = "deepdiff" },
@@ -1323,9 +1323,36 @@ dependencies = [
     { name = "rich" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/dd/fe/bbbbc34434690aaddbbafb5bc3c6117e8a0de551c19c72a5f5870ae9d8c4/spirisynq-0.4.0.tar.gz", hash = "sha256:a22f078809660b702432bcc8aaa1e9707d29b7a04acb50766f72976abf5efb84", size = 77539, upload-time = "2026-10-17T11:54:02.104Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/23/76/e5706d829deb86b780ba6afa026e5fa0b15220cea18419112ee4ce64fd43/spirisynq-0.4.0-py3-none-any.whl", hash = "sha256:db59ea4f582abd7e2e8c1d8a33274e392fba8fa5e4227d2cebcc98f32d18d86c", size = 50059, upload-time = "2026-10-17T11:54:00.639Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "autodoc-pydantic", marker = "extra == 'docs'", specifier = ">=2.0" },
+    { name = "click", specifier = ">=8.3.3" },
+    { name = "deepdiff", specifier = ">=9.0.0" },
+    { name = "eclipse-zenoh", specifier = ">=1.8.0" },
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "myst-parser", marker = "extra == 'docs'", specifier = ">=4.0" },
+    { name = "psygnal", specifier = ">=0.15.1" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rich", specifier = ">=14.3.3" },
+    { name = "sphinx", marker = "extra == 'docs'", specifier = ">=8.0" },
+    { name = "sphinx-rtd-theme", marker = "extra == 'docs'", specifier = ">=3.0" },
+    { name = "typer", specifier = ">=0.24.1" },
+]
+provides-extras = ["docs"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "jsonschema", specifier = ">=4.26.0" },
+    { name = "objgraph", specifier = ">=3.6.2" },
+    { name = "pytest", specifier = ">=9.0.2" },
+    { name = "pytest-benchmark", specifier = ">=5.2.3" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+]
+examples = [
+    { name = "imagecodecs", specifier = ">=2026.3.6" },
+    { name = "nicegui", specifier = ">=3.9.0" },
+    { name = "opencv-python-headless", specifier = ">=4.13.0.92" },
 ]
 
 [[package]]
