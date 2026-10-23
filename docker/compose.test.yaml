@@ -1,0 +1,21 @@
+# SpiriMav Docker Compose - Test Environment
+#
+# Run tests inside the container to catch environment differences:
+#   docker compose -f docker/compose.yaml -f docker/compose.test.yaml run --rm test
+#
+# In CI with full integration:
+#   docker compose -f docker/compose.yaml -f docker/compose.dev.yaml -f docker/compose.test.yaml run test
+
+services:
+  test:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: SpiriMav:test
+    command: ["python", "-m", "pytest", "tests/", "-v", "--tb=short"]
+    volumes:
+      - ../tests:/app/tests:ro
+    environment:
+      - ENVIRONMENT=test
+      - LOG_LEVEL=DEBUG
+      - PYTEST_ADDOPTS=--color=yes
