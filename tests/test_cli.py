@@ -25,7 +25,6 @@ def test_cli_help() -> None:
     assert "SpiriMav" in result.stdout
 
 
-
 def test_cli_run_overrides_settings(monkeypatch) -> None:
     """Options on `run` override SPIRI_MAV_* settings; unset ones keep them."""
     from typer.testing import CliRunner
@@ -34,11 +33,19 @@ def test_cli_run_overrides_settings(monkeypatch) -> None:
 
     served = []
     monkeypatch.setenv("SPIRI_MAV_TARGET_SYSID", "3")
-    monkeypatch.setattr(spiri_mav.main, "serve", lambda settings: served.append(settings))
-    result = CliRunner().invoke(app, ["run", "--url", "udpin:0.0.0.0:14550", "--sysid", "200"])
+    monkeypatch.setattr(
+        spiri_mav.main, "serve", lambda settings: served.append(settings)
+    )
+    result = CliRunner().invoke(
+        app, ["run", "--url", "udpin:0.0.0.0:14550", "--sysid", "200"]
+    )
     assert result.exit_code == 0, result.output
     [settings] = served
-    assert (settings.mavlink_url, settings.sysid, settings.target_sysid) == ("udpin:0.0.0.0:14550", 200, 3)
+    assert (settings.mavlink_url, settings.sysid, settings.target_sysid) == (
+        "udpin:0.0.0.0:14550",
+        200,
+        3,
+    )
 
 
 def test_serve_closes_robot_on_interrupt(monkeypatch) -> None:
@@ -53,7 +60,9 @@ def test_serve_closes_robot_on_interrupt(monkeypatch) -> None:
 
     monkeypatch.setattr(MavRobot, "run", fake_run)
     monkeypatch.setattr(MavRobot, "close", lambda self: calls.append("closed"))
-    serve(Settings(topic="test/serve_robot", sysid=200, mavlink_url="tcp:127.0.0.1:5760"))
+    serve(
+        Settings(topic="test/serve_robot", sysid=200, mavlink_url="tcp:127.0.0.1:5760")
+    )
     assert calls == [("test/serve_robot", 200, "tcp:127.0.0.1:5760"), "closed"]
 
 

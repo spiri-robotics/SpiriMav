@@ -45,25 +45,38 @@ def version() -> None:
 @app.command()
 def run(
     url: Annotated[
-        str | None, typer.Option("--url", "-u", help="MAVLink connection string, e.g. /dev/ttyAMA0,921600")
+        str | None,
+        typer.Option(
+            "--url", "-u", help="MAVLink connection string, e.g. /dev/ttyAMA0,921600"
+        ),
     ] = None,
     sysid: Annotated[
         int | None, typer.Option(help="Our MAVLink sysid; never the FCU's GCS sysid")
     ] = None,
-    target_sysid: Annotated[int | None, typer.Option(help="The autopilot's sysid")] = None,
-    topic: Annotated[str | None, typer.Option(help="SpiriSynq topic for the robot")] = None,
+    target_sysid: Annotated[
+        int | None, typer.Option(help="The autopilot's sysid")
+    ] = None,
+    topic: Annotated[
+        str | None, typer.Option(help="SpiriSynq topic for the robot")
+    ] = None,
     zenoh_connect: Annotated[
-        str | None, typer.Option(help="Zenoh router to join as a client, e.g. tcp/127.0.0.1:7447")
+        str | None,
+        typer.Option(help="Zenoh router to join as a client, e.g. tcp/127.0.0.1:7447"),
     ] = None,
 ) -> None:
     """Bridge the autopilot to SpiriSynq. Options override SPIRI_MAV_* settings."""
     from spiri_mav.main import get_settings, serve
 
     overrides = {
-        "mavlink_url": url, "sysid": sysid, "target_sysid": target_sysid, "topic": topic,
+        "mavlink_url": url,
+        "sysid": sysid,
+        "target_sysid": target_sysid,
+        "topic": topic,
         "zenoh_connect": zenoh_connect,
     }
-    settings = get_settings().model_copy(update={k: v for k, v in overrides.items() if v is not None})
+    settings = get_settings().model_copy(
+        update={k: v for k, v in overrides.items() if v is not None}
+    )
     serve(settings)
 
 

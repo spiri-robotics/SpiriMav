@@ -1,5 +1,11 @@
 # Changes
 
+## Unreleased
+
+### Internal
+
+- Code formatted and linted with ruff, as CI checks.
+
 ## 0.1.0 (2026-10-23)
 
 ### Features

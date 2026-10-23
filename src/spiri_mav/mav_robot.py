@@ -32,11 +32,27 @@ from typing import Any, Literal
 
 from loguru import logger
 from pymavlink import mavutil
-from SpiriSynq.example_types.position import Accuracy, Offset, Orientation, Pose, Position, RootFrame
+from SpiriSynq.example_types.position import (
+    Accuracy,
+    Offset,
+    Orientation,
+    Pose,
+    Position,
+    RootFrame,
+)
 from SpiriSynq.link import Link
 
 from spiri_mav.gimbal import Gimbal
-from spiri_mav.robot import Battery, BatteryState, CommandRefused, Failsafe, GpsFix, GpsFixType, Robot, Velocity
+from spiri_mav.robot import (
+    Battery,
+    BatteryState,
+    CommandRefused,
+    Failsafe,
+    GpsFix,
+    GpsFixType,
+    Robot,
+    Velocity,
+)
 
 # MAVLink 2: we rely on its extension fields (GPS_RAW_INT accuracies and
 # alt_ellipsoid, COMMAND_ACK.target_system, ...). pymavlink picks v1 or v2 from
@@ -48,10 +64,10 @@ if mavutil.mavlink.WIRE_PROTOCOL_VERSION != "2.0":
 mavlink = mavutil.mavlink
 
 HEARTBEAT_TIMEOUT = 3.0  # s without an autopilot heartbeat before `connected` drops
-GCS_TIMEOUT = 5.0        # s without another GCS's heartbeat before `gcs_seen` drops
-COMMAND_TIMEOUT = 1.5    # s to wait for a COMMAND_ACK, per attempt
+GCS_TIMEOUT = 5.0  # s without another GCS's heartbeat before `gcs_seen` drops
+COMMAND_TIMEOUT = 1.5  # s to wait for a COMMAND_ACK, per attempt
 COMMAND_ATTEMPTS = 3
-RECONNECT_DELAY = 1.0      # s before reconnecting a lost link; doubles while it stays down
+RECONNECT_DELAY = 1.0  # s before reconnecting a lost link; doubles while it stays down
 RECONNECT_MAX_DELAY = 10.0
 
 # What we ask the autopilot to stream, in Hz.
@@ -110,7 +126,9 @@ def classify_failsafe_text(text: str) -> tuple[Failsafe, bool] | None:
     lowered = text.lower()
     if not _FAILSAFE_WORDS.search(lowered):
         return None
-    kind: Failsafe = next((k for pattern, k in _FAILSAFE_KINDS if pattern.search(lowered)), "other")
+    kind: Failsafe = next(
+        (k for pattern, k in _FAILSAFE_KINDS if pattern.search(lowered)), "other"
+    )
     return kind, bool(_CLEARED_WORDS.search(lowered))
 
 
@@ -134,7 +152,9 @@ def _open_link(url: str, sysid: int, compid: int):
     recv raises it anyway, and a write to a dead link, from whichever thread,
     is dropped.
     """
-    conn = mavutil.mavlink_connection(url, source_system=sysid, source_component=compid, retries=0)
+    conn = mavutil.mavlink_connection(
+        url, source_system=sysid, source_component=compid, retries=0
+    )
 
     def eof():
         raise _LinkLost("link closed by peer")
@@ -171,7 +191,9 @@ class MavGimbal(Gimbal):
     """
 
     device_id: int = 0
-    primary_control: tuple[int, int] | None = None  # (sysid, compid) in control; display only
+    primary_control: tuple[int, int] | None = (
+        None  # (sysid, compid) in control; display only
+    )
 
     _robot: MavRobot | None = None
 
@@ -183,7 +205,10 @@ class MavGimbal(Gimbal):
             in_control = (msg.primary_control_sysid, msg.primary_control_compid)
             self.primary_control = in_control if msg.primary_control_sysid else None
         elif kind == "GIMBAL_MANAGER_INFORMATION":
-            self.pitch_range = (math.degrees(msg.pitch_min), math.degrees(msg.pitch_max))
+            self.pitch_range = (
+                math.degrees(msg.pitch_min),
+                math.degrees(msg.pitch_max),
+            )
             self.yaw_range = (math.degrees(msg.yaw_min), math.degrees(msg.yaw_max))
 
     def _on_attitude(self, msg) -> None:
@@ -199,7 +224,9 @@ class MavGimbal(Gimbal):
         elif flags & mavlink.GIMBAL_DEVICE_FLAGS_YAW_IN_VEHICLE_FRAME:
             earth_yaw = False
         else:
-            earth_yaw = bool(flags & mavlink.GIMBAL_DEVICE_FLAGS_YAW_LOCK)  # devices predating those flags
+            earth_yaw = bool(
+                flags & mavlink.GIMBAL_DEVICE_FLAGS_YAW_LOCK
+            )  # devices predating those flags
         q = Orientation(*msg.q)
         in_ned = q if earth_yaw else Orientation.from_euler(0, 0, body.yaw) * q
 
@@ -219,11 +246,16 @@ class MavGimbal(Gimbal):
         robot = self._robot_or_refuse()
         if self.primary_control == (robot.sysid, robot.compid):
             return
-        robot._command(mavlink.MAV_CMD_DO_GIMBAL_MANAGER_CONFIGURE,
-                       (robot.sysid, robot.compid, -1, -1, 0, 0, self.device_id))
+        robot._command(
+            mavlink.MAV_CMD_DO_GIMBAL_MANAGER_CONFIGURE,
+            (robot.sysid, robot.compid, -1, -1, 0, 0, self.device_id),
+        )
 
     def _do_point(self, pitch: float, yaw: float, yaw_lock: bool) -> None:
-        flags = mavlink.GIMBAL_MANAGER_FLAGS_ROLL_LOCK | mavlink.GIMBAL_MANAGER_FLAGS_PITCH_LOCK
+        flags = (
+            mavlink.GIMBAL_MANAGER_FLAGS_ROLL_LOCK
+            | mavlink.GIMBAL_MANAGER_FLAGS_PITCH_LOCK
+        )
         if yaw_lock:
             flags |= mavlink.GIMBAL_MANAGER_FLAGS_YAW_LOCK
         self._take_control()
@@ -237,24 +269,37 @@ class MavGimbal(Gimbal):
         lat, lon, height = target.to_geodetic()
         self._take_control()
         robot._command(
-            mavlink.MAV_CMD_DO_SET_ROI_LOCATION, (self.device_id,),
+            mavlink.MAV_CMD_DO_SET_ROI_LOCATION,
+            (self.device_id,),
             int_frame=mavlink.MAV_FRAME_GLOBAL,
-            x=round(lat * 1e7), y=round(lon * 1e7), z=height - robot._separation(),
+            x=round(lat * 1e7),
+            y=round(lon * 1e7),
+            z=height - robot._separation(),
         )
 
     def _do_neutral(self) -> None:
         self._take_control()
         self._robot_or_refuse()._command(
             mavlink.MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW,
-            (math.nan, math.nan, math.nan, math.nan, mavlink.GIMBAL_MANAGER_FLAGS_NEUTRAL, 0, self.device_id),
+            (
+                math.nan,
+                math.nan,
+                math.nan,
+                math.nan,
+                mavlink.GIMBAL_MANAGER_FLAGS_NEUTRAL,
+                0,
+                self.device_id,
+            ),
         )
 
     def _do_release(self) -> None:
         robot = self._robot_or_refuse()
         robot._command(mavlink.MAV_CMD_DO_SET_ROI_NONE, (self.device_id,))
         if self.primary_control == (robot.sysid, robot.compid):
-            robot._command(mavlink.MAV_CMD_DO_GIMBAL_MANAGER_CONFIGURE,
-                           (-3, -3, -1, -1, 0, 0, self.device_id))
+            robot._command(
+                mavlink.MAV_CMD_DO_GIMBAL_MANAGER_CONFIGURE,
+                (-3, -3, -1, -1, 0, 0, self.device_id),
+            )
 
 
 @dataclass
@@ -266,27 +311,29 @@ class MavRobot(Robot):
     """
 
     autopilot: Literal["ardupilot", "px4", "unknown"] = "unknown"
-    vehicle_type: str = ""              # MAV_TYPE, e.g. "quadrotor"
-    system_status: str = ""             # MAV_STATE, e.g. "standby", "active", "critical"
-    sysid: int = 254                    # ours; must never be the FCU's GCS sysid
+    vehicle_type: str = ""  # MAV_TYPE, e.g. "quadrotor"
+    system_status: str = ""  # MAV_STATE, e.g. "standby", "active", "critical"
+    sysid: int = 254  # ours; must never be the FCU's GCS sysid
     compid: int = mavlink.MAV_COMP_ID_ONBOARD_COMPUTER
     target_sysid: int = 1
     target_compid: int = mavlink.MAV_COMP_ID_AUTOPILOT1
-    gcs_seen: bool = False              # display only: never gate anything on it
+    gcs_seen: bool = False  # display only: never gate anything on it
     last_statustext: str | None = None
 
-    _conn: Any = None                   # pymavlink connection
+    _conn: Any = None  # pymavlink connection
     _origin: Position | None = None
     _home: Position | None = None
     _roi: Position | None = None
     _gimbals: dict[int, MavGimbal] = field(default_factory=dict)  # by gimbal device id
-    _gimbal_cameras: dict[int, tuple[Link, ...]] = field(default_factory=dict)  # config: MAVLink doesn't say
+    _gimbal_cameras: dict[int, tuple[Link, ...]] = field(
+        default_factory=dict
+    )  # config: MAVLink doesn't say
     _mav_type: int | None = None
     _local: Offset | None = None
     _attitude: Orientation | None = None
     _accuracy: Accuracy | None = None
     _origin_geo: tuple[float, float, float] | None = None  # lat°, lon°, m AMSL
-    _geoid_separation: float | None = None                 # ellipsoid - MSL, m
+    _geoid_separation: float | None = None  # ellipsoid - MSL, m
     _home_amsl: float | None = None
     _failsafe_kinds: frozenset[Failsafe] = frozenset()
     _failsafe_text: str | None = None
@@ -302,12 +349,22 @@ class MavRobot(Robot):
         super().__post_init__()
         if not self.synq_authoritive:
             return
-        self._origin = Position(f"{self.synq_topic}_origin", synq_authoritive=True,
-                                relative_to=RootFrame("ECEF"))
-        self._home = Position(f"{self.synq_topic}_home", synq_authoritive=True,
-                              relative_to=Link.to(self._origin))
+        self._origin = Position(
+            f"{self.synq_topic}_origin",
+            synq_authoritive=True,
+            relative_to=RootFrame("ECEF"),
+        )
+        self._home = Position(
+            f"{self.synq_topic}_home",
+            synq_authoritive=True,
+            relative_to=Link.to(self._origin),
+        )
         self.home = Link.to(self._home)
-        self._roi = Position(f"{self.synq_topic}_roi", synq_authoritive=True, relative_to=RootFrame("ECEF"))
+        self._roi = Position(
+            f"{self.synq_topic}_roi",
+            synq_authoritive=True,
+            relative_to=RootFrame("ECEF"),
+        )
         self.relative_to = Link.to(self._origin)
 
     def close(self):
@@ -329,7 +386,9 @@ class MavRobot(Robot):
         while not stop.is_set():
             try:
                 self._conn = _open_link(url, self.sysid, self.compid)
-                logger.info("MAVLink on {} as sysid {} compid {}", url, self.sysid, self.compid)
+                logger.info(
+                    "MAVLink on {} as sysid {} compid {}", url, self.sysid, self.compid
+                )
                 while not stop.is_set():
                     msg = self._conn.recv_match(blocking=True, timeout=0.1)
                     if msg is not None:
@@ -339,7 +398,9 @@ class MavRobot(Robot):
                     self.tick()
             except (_LinkLost, OSError) as e:
                 self._drop_link()
-                logger.warning("MAVLink on {}: {}; reconnecting in {:g} s", url, e, delay)
+                logger.warning(
+                    "MAVLink on {}: {}; reconnecting in {:g} s", url, e, delay
+                )
                 stop.wait(delay)
                 delay = min(delay * 2, RECONNECT_MAX_DELAY)
         self._drop_link()
@@ -393,9 +454,14 @@ class MavRobot(Robot):
         if gimbal is None:
             if not self.synq_authoritive:
                 return
-            gimbal = MavGimbal(f"{self.synq_topic}_gimbal{device_id}", synq_authoritive=True,
-                               relative_to=Link.to(self), device_id=device_id, _robot=self,
-                               cameras=self._gimbal_cameras.get(device_id, ()))
+            gimbal = MavGimbal(
+                f"{self.synq_topic}_gimbal{device_id}",
+                synq_authoritive=True,
+                relative_to=Link.to(self),
+                device_id=device_id,
+                _robot=self,
+                cameras=self._gimbal_cameras.get(device_id, ()),
+            )
             self._gimbals[device_id] = gimbal
             self.gimbals = tuple(Link.to(g) for _, g in sorted(self._gimbals.items()))
         gimbal.handle(msg)
@@ -409,7 +475,10 @@ class MavRobot(Robot):
                 self._last_gcs_heartbeat = now
                 self.gcs_seen = True
             return
-        if (msg.get_srcSystem(), msg.get_srcComponent()) != (self.target_sysid, self.target_compid):
+        if (msg.get_srcSystem(), msg.get_srcComponent()) != (
+            self.target_sysid,
+            self.target_compid,
+        ):
             return
         if msg.autopilot == mavlink.MAV_AUTOPILOT_INVALID:
             return
@@ -445,7 +514,9 @@ class MavRobot(Robot):
         if classified is None:
             return
         kind, cleared = classified
-        self._failsafe_kinds = self._failsafe_kinds - {kind} if cleared else self._failsafe_kinds | {kind}
+        self._failsafe_kinds = (
+            self._failsafe_kinds - {kind} if cleared else self._failsafe_kinds | {kind}
+        )
         if not cleared:
             self._failsafe_text = text
         self._publish_failsafe()
@@ -477,24 +548,35 @@ class MavRobot(Robot):
     def _on_gps_raw_int(self, msg) -> None:
         self.gps = GpsFix(
             fix=_FIX_TYPES.get(msg.fix_type, "none"),
-            satellites=None if msg.satellites_visible == 255 else msg.satellites_visible,
+            satellites=None
+            if msg.satellites_visible == 255
+            else msg.satellites_visible,
             hdop=None if msg.eph == 65535 else msg.eph / 100,
         )
         # h_acc/v_acc are roughly 1-sigma; Accuracy is CEP90/LEP90. A stand-in
         # for the EKF's own accuracy, which MAVLink doesn't report in metres.
         h_acc = getattr(msg, "h_acc", 0) or None
         v_acc = getattr(msg, "v_acc", 0) or None
-        self._accuracy = Accuracy.from_cot(h_acc and h_acc / 1000, v_acc and v_acc / 1000)
+        self._accuracy = Accuracy.from_cot(
+            h_acc and h_acc / 1000, v_acc and v_acc / 1000
+        )
 
         alt_ellipsoid = getattr(msg, "alt_ellipsoid", 0)
         if alt_ellipsoid and msg.fix_type >= mavlink.GPS_FIX_TYPE_3D_FIX:
             separation = (alt_ellipsoid - msg.alt) / 1000
-            if self._geoid_separation is None or abs(separation - self._geoid_separation) > 0.5:
+            if (
+                self._geoid_separation is None
+                or abs(separation - self._geoid_separation) > 0.5
+            ):
                 self._geoid_separation = separation
                 self._update_origin()
 
     def _on_gps_global_origin(self, msg) -> None:
-        self._origin_geo = (msg.latitude / 1e7, msg.longitude / 1e7, msg.altitude / 1000)
+        self._origin_geo = (
+            msg.latitude / 1e7,
+            msg.longitude / 1e7,
+            msg.altitude / 1000,
+        )
         self._update_origin()
 
     def _update_origin(self) -> None:
@@ -523,7 +605,9 @@ class MavRobot(Robot):
             id=msg.id,
             voltage=sum(cells) / 1000 if cells else None,
             current=None if msg.current_battery == -1 else msg.current_battery / 100,
-            remaining=None if msg.battery_remaining == -1 else msg.battery_remaining / 100,
+            remaining=None
+            if msg.battery_remaining == -1
+            else msg.battery_remaining / 100,
             state=_BATTERY_STATES.get(getattr(msg, "charge_state", 0), "unknown"),
         )
         others = tuple(b for b in self.batteries if b.id != battery.id)
@@ -535,7 +619,8 @@ class MavRobot(Robot):
             logger.critical(
                 "Our sysid {} is the FCU's GCS sysid ({}): our heartbeat would mask a lost QGC. "
                 "Not heartbeating or commanding until restarted with another sysid.",
-                self.sysid, name,
+                self.sysid,
+                name,
             )
             self._sysid_conflict = True
 
@@ -565,23 +650,39 @@ class MavRobot(Robot):
                 mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, (message_id, 1e6 / hz)
             )
         self._send_command_long(
-            mavlink.MAV_CMD_REQUEST_MESSAGE, (mavlink.MAVLINK_MSG_ID_GIMBAL_MANAGER_INFORMATION,)
+            mavlink.MAV_CMD_REQUEST_MESSAGE,
+            (mavlink.MAVLINK_MSG_ID_GIMBAL_MANAGER_INFORMATION,),
         )
 
     def _send_heartbeat(self) -> None:
         if self._conn is None or self._sysid_conflict:
             return
         self._conn.mav.heartbeat_send(
-            mavlink.MAV_TYPE_ONBOARD_CONTROLLER, mavlink.MAV_AUTOPILOT_INVALID, 0, 0,
+            mavlink.MAV_TYPE_ONBOARD_CONTROLLER,
+            mavlink.MAV_AUTOPILOT_INVALID,
+            0,
+            0,
             mavlink.MAV_STATE_ACTIVE,
         )
 
-    def _send_command_long(self, command: int, params=(), confirmation: int = 0) -> None:
+    def _send_command_long(
+        self, command: int, params=(), confirmation: int = 0
+    ) -> None:
         p = (tuple(params) + (0.0,) * 7)[:7]
-        self._conn.mav.command_long_send(self.target_sysid, self.target_compid, command, confirmation, *p)
+        self._conn.mav.command_long_send(
+            self.target_sysid, self.target_compid, command, confirmation, *p
+        )
 
-    def _command(self, command: int, params=(), *, int_frame: int | None = None,
-                 x: int = 0, y: int = 0, z: float = 0.0) -> None:
+    def _command(
+        self,
+        command: int,
+        params=(),
+        *,
+        int_frame: int | None = None,
+        x: int = 0,
+        y: int = 0,
+        z: float = 0.0,
+    ) -> None:
         """Send a command and wait for its ACK; raise CommandRefused unless accepted.
 
         Blocks, so never call it from the thread that runs :meth:`handle`.
@@ -603,7 +704,16 @@ class MavRobot(Robot):
                 else:
                     p = (tuple(params) + (0.0,) * 4)[:4]
                     self._conn.mav.command_int_send(
-                        self.target_sysid, self.target_compid, int_frame, command, 0, 0, *p, x, y, z
+                        self.target_sysid,
+                        self.target_compid,
+                        int_frame,
+                        command,
+                        0,
+                        0,
+                        *p,
+                        x,
+                        y,
+                        z,
                     )
                 if waiter.event.wait(COMMAND_TIMEOUT):
                     break
@@ -616,7 +726,9 @@ class MavRobot(Robot):
         if waiter.result is None:
             raise CommandRefused(f"{name}: no COMMAND_ACK")
         if waiter.result != mavlink.MAV_RESULT_ACCEPTED:
-            raise CommandRefused(f"{name}: {_enum_name('MAV_RESULT', waiter.result, 'MAV_RESULT_')}")
+            raise CommandRefused(
+                f"{name}: {_enum_name('MAV_RESULT', waiter.result, 'MAV_RESULT_')}"
+            )
 
     def _modes(self) -> tuple[str, ...]:
         if self.autopilot == "px4":
@@ -628,7 +740,10 @@ class MavRobot(Robot):
     # ── Robot hooks ───────────────────────────────────────────────────────────
 
     def _do_arm(self, arm: bool, force: bool) -> None:
-        self._command(mavlink.MAV_CMD_COMPONENT_ARM_DISARM, (1 if arm else 0, 21196 if force else 0))
+        self._command(
+            mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            (1 if arm else 0, 21196 if force else 0),
+        )
 
     def _do_set_mode(self, mode: str) -> None:
         if self.autopilot == "px4":
@@ -638,7 +753,10 @@ class MavRobot(Robot):
             number = (mavutil.mode_mapping_byname(self._mav_type) or {}).get(mode)
             if number is None:
                 raise CommandRefused(f"Unknown mode {mode!r}")
-            self._command(mavlink.MAV_CMD_DO_SET_MODE, (mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, number))
+            self._command(
+                mavlink.MAV_CMD_DO_SET_MODE,
+                (mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, number),
+            )
 
     def _do_takeoff(self, altitude: float) -> None:
         nan = math.nan
@@ -646,7 +764,10 @@ class MavRobot(Robot):
             # PX4 takes AMSL; ArduPilot takes metres above home.
             if self._home_amsl is None:
                 raise CommandRefused("takeoff: home position unknown")
-            self._command(mavlink.MAV_CMD_NAV_TAKEOFF, (nan, 0, 0, nan, nan, nan, self._home_amsl + altitude))
+            self._command(
+                mavlink.MAV_CMD_NAV_TAKEOFF,
+                (nan, 0, 0, nan, nan, nan, self._home_amsl + altitude),
+            )
         else:
             self._command(mavlink.MAV_CMD_NAV_TAKEOFF, (0, 0, 0, 0, 0, 0, altitude))
 
@@ -656,7 +777,9 @@ class MavRobot(Robot):
             mavlink.MAV_CMD_DO_REPOSITION,
             (-1, mavlink.MAV_DO_REPOSITION_FLAGS_CHANGE_MODE, 0, math.nan),
             int_frame=mavlink.MAV_FRAME_GLOBAL,
-            x=round(lat * 1e7), y=round(lon * 1e7), z=height - self._separation(),
+            x=round(lat * 1e7),
+            y=round(lon * 1e7),
+            z=height - self._separation(),
         )
 
     def _do_land(self) -> None:
@@ -674,9 +797,12 @@ class MavRobot(Robot):
         else:
             lat, lon, height = target.to_geodetic()
             self._command(
-                mavlink.MAV_CMD_DO_SET_ROI_LOCATION, (0,),
+                mavlink.MAV_CMD_DO_SET_ROI_LOCATION,
+                (0,),
                 int_frame=mavlink.MAV_FRAME_GLOBAL,
-                x=round(lat * 1e7), y=round(lon * 1e7), z=height - self._separation(),
+                x=round(lat * 1e7),
+                y=round(lon * 1e7),
+                z=height - self._separation(),
             )
         self._show_roi(target)
 

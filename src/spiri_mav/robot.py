@@ -22,7 +22,9 @@ Failsafe = Literal["gcs", "rc", "battery", "geofence", "ekf", "other"]
 
 GpsFixType = Literal["none", "2d", "3d", "dgps", "rtk_float", "rtk_fixed"]
 
-BatteryState = Literal["unknown", "ok", "low", "critical", "emergency", "failed", "unhealthy"]
+BatteryState = Literal[
+    "unknown", "ok", "low", "critical", "emergency", "failed", "unhealthy"
+]
 
 
 @dataclass(frozen=True)
@@ -46,8 +48,8 @@ class GpsFix:
 @dataclass(frozen=True)
 class Battery:
     id: int
-    voltage: float | None = None    # V
-    current: float | None = None    # A, positive when discharging
+    voltage: float | None = None  # V
+    current: float | None = None  # A, positive when discharging
     remaining: float | None = None  # 0..1
     state: BatteryState = "unknown"
 
@@ -67,15 +69,15 @@ class Robot(Position):
     the fields (``armed``, ``mode``, ``pose``) for the outcome.
     """
 
-    connected: bool = False                  # autopilot link alive
+    connected: bool = False  # autopilot link alive
     armed: bool = False
-    mode: str = ""                           # autopilot-native name, e.g. "GUIDED"
-    available_modes: tuple[str, ...] = ()    # what set_mode accepts on this vehicle
-    failsafe: tuple[Failsafe, ...] = ()      # sorted; empty when none is active
-    failsafe_text: str | None = None         # the message behind failsafe, if any
-    home: Link | None = None                 # a Position where return_home goes
-    roi: Link | None = None                  # a Position set_roi pointed us at; None when cleared
-    gimbals: tuple[Link, ...] = ()           # Gimbals mounted relative_to this robot
+    mode: str = ""  # autopilot-native name, e.g. "GUIDED"
+    available_modes: tuple[str, ...] = ()  # what set_mode accepts on this vehicle
+    failsafe: tuple[Failsafe, ...] = ()  # sorted; empty when none is active
+    failsafe_text: str | None = None  # the message behind failsafe, if any
+    home: Link | None = None  # a Position where return_home goes
+    roi: Link | None = None  # a Position set_roi pointed us at; None when cleared
+    gimbals: tuple[Link, ...] = ()  # Gimbals mounted relative_to this robot
     velocity: Velocity | None = None
     gps: GpsFix | None = None
     batteries: tuple[Battery, ...] = ()
@@ -94,7 +96,9 @@ class Robot(Position):
     def set_mode(self, mode: str) -> None:
         """Switch to *mode*, one of ``available_modes``."""
         if self.available_modes and mode not in self.available_modes:
-            raise CommandRefused(f"Unknown mode {mode!r}; available: {', '.join(self.available_modes)}")
+            raise CommandRefused(
+                f"Unknown mode {mode!r}; available: {', '.join(self.available_modes)}"
+            )
         self._do_set_mode(mode)
 
     @remote_method()

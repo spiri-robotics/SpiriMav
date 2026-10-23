@@ -30,12 +30,12 @@ class Gimbal(Position):
     return once the vehicle accepts and raise :class:`CommandRefused` otherwise.
     """
 
-    pitch: float | None = None                    # deg from the horizon, + up
-    yaw: float | None = None                      # deg from the robot's heading, + right
-    yaw_lock: bool = False                        # holds an earth heading instead of following the robot
+    pitch: float | None = None  # deg from the horizon, + up
+    yaw: float | None = None  # deg from the robot's heading, + right
+    yaw_lock: bool = False  # holds an earth heading instead of following the robot
     pitch_range: tuple[float, float] | None = None  # deg
-    yaw_range: tuple[float, float] | None = None    # deg, robot-relative
-    cameras: tuple[Link, ...] = ()                # SpiriCamera cameras this gimbal carries
+    yaw_range: tuple[float, float] | None = None  # deg, robot-relative
+    cameras: tuple[Link, ...] = ()  # SpiriCamera cameras this gimbal carries
 
     @remote_method()
     def point(self, pitch: float, yaw: float, yaw_lock: bool = False) -> None:
