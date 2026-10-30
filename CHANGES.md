@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Features
+
+- **The ROI from any GCS**: `Robot.roi` and `<robot>_roi` now follow ROI commands that QGC
+  or another GCS sends the autopilot, once it accepts them, as well as SpiriMav's own and
+  `Gimbal.point_at`. This needs mavlink-router's `SnifferSysid` set to SpiriMav's sysid, so
+  other GCSs' commands reach it. Pointing by angle ends the ROI; an ROI that can't be placed
+  (above terrain, the next waypoint, another system) hides it. ROIs from a mission still
+  don't show.
+- **The ROI and home are points**: their poses have no orientation (SpiriSynq 0.6.0), so they
+  no longer show made-up angles.
+
+### Fixes
+
+- **SpiriSynq from PyPI**, `>=0.6.0`, instead of a `../SpiriSynq` checkout, which broke CI
+  and the Docker image build.
+
 ### Internal
 
 - Code formatted and linted with ruff, as CI checks.

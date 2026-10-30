@@ -491,6 +491,126 @@ def test_reconnect_forgets_the_roi(connected):
     assert connected.roi is None
 
 
+QGC = (255, 190)
+
+
+def qgc_roi_int(lat, lon, alt, frame=mavlink.MAV_FRAME_GLOBAL):
+    return from_src(
+        "command_int",
+        *FCU,
+        frame,
+        mavlink.MAV_CMD_DO_SET_ROI_LOCATION,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        round(lat * 1e7),
+        round(lon * 1e7),
+        alt,
+        src=QGC,
+    )
+
+
+def ack_to_qgc(command, result=mavlink.MAV_RESULT_ACCEPTED):
+    return from_src("command_ack", command, result, 0, 0, *QGC)
+
+
+def test_another_gcs_roi_shows_once_accepted(connected):
+    connected._geoid_separation = -34.0
+    connected.handle(qgc_roi_int(45.0, -75.0, 100.0))
+    assert connected.roi is None  # not until the FCU accepts it
+
+    connected.handle(ack_to_qgc(mavlink.MAV_CMD_DO_SET_ROI_LOCATION))
+    assert connected.roi == Link.to(connected._roi)
+    assert _wait_for(lambda: connected._roi.pose is not None)
+    assert connected._roi.pose.offset.to_geodetic() == pytest.approx(
+        (45.0, -75.0, 66.0), abs=1e-6
+    )
+    assert connected._roi.pose.orientation is None  # a point: it faces nowhere
+
+    connected.handle(
+        from_src(
+            "command_long",
+            *FCU,
+            mavlink.MAV_CMD_DO_SET_ROI_NONE,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            src=QGC,
+        )
+    )
+    connected.handle(ack_to_qgc(mavlink.MAV_CMD_DO_SET_ROI_NONE))
+    assert connected.roi is None
+
+
+def test_another_gcs_refused_roi_is_not_shown(connected):
+    connected.handle(qgc_roi_int(45.0, -75.0, 100.0))
+    connected.handle(
+        ack_to_qgc(mavlink.MAV_CMD_DO_SET_ROI_LOCATION, mavlink.MAV_RESULT_DENIED)
+    )
+    assert connected.roi is None
+
+
+def test_another_gcs_roi_long_is_above_home_on_ardupilot(connected):
+    connected._home_amsl = 60.0
+    connected.handle(
+        from_src(
+            "command_long",
+            *FCU,
+            mavlink.MAV_CMD_DO_SET_ROI_LOCATION,
+            0,
+            0,
+            0,
+            0,
+            0,
+            45.0,
+            -75.0,
+            10.0,
+            src=QGC,
+        )
+    )
+    connected.handle(ack_to_qgc(mavlink.MAV_CMD_DO_SET_ROI_LOCATION))
+    assert connected._roi.mount.offset.to_geodetic()[2] == pytest.approx(70.0, abs=1e-6)
+
+
+def test_another_gcs_unplaceable_roi_hides_ours(connected):
+    connected._show_roi(Offset.from_geodetic(45.0, -75.0, 66.0))
+    connected.handle(
+        qgc_roi_int(45.0, -75.0, 10.0, frame=mavlink.MAV_FRAME_GLOBAL_TERRAIN_ALT)
+    )
+    connected.handle(ack_to_qgc(mavlink.MAV_CMD_DO_SET_ROI_LOCATION))
+    assert connected.roi is None
+
+
+def test_another_gcs_pointing_by_angle_ends_the_roi(connected):
+    connected._show_roi(Offset.from_geodetic(45.0, -75.0, 66.0))
+    connected.handle(
+        from_src(
+            "command_long",
+            *FCU,
+            mavlink.MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW,
+            0,
+            -45,
+            0,
+            math.nan,
+            math.nan,
+            0,
+            0,
+            0,
+            src=QGC,
+        )
+    )
+    connected.handle(ack_to_qgc(mavlink.MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW))
+    assert connected.roi is None
+
+
 def test_commands_need_a_connection(robot):
     with pytest.raises(CommandRefused, match="not connected"):
         robot.arm()

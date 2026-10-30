@@ -7,7 +7,7 @@ The robot hangs in the frame tree under the autopilot's EKF origin::
      │          │                 └─ mount = LOCAL_POSITION_NED + ATTITUDE_QUATERNION
      │          ├─ mount = GPS_GLOBAL_ORIGIN, oriented as NED there
      │          └─▶ <robot>_home    mount = HOME_POSITION (local NED)
-     └─▶ <robot>_roi    mount = the ROI we last set, in ECEF
+     └─▶ <robot>_roi    mount = the last ROI any GCS set and the FCU accepted, in ECEF
 
 so autopilot telemetry goes into mounts unconverted, and the part of the tree
 below the origin works without GPS. The origin, home and ROI are sibling topics,
@@ -84,6 +84,25 @@ STREAMS = {
 
 # The FCU's GCS sysid: ArduPilot's old and new names, PX4 doesn't have one.
 GCS_SYSID_PARAMS = ("SYSID_MYGCS", "MAV_GCS_SYSID")
+
+# Commands that change where the gimbals point, so what the ROI is. Another
+# GCS's reach us because mavlink-router is set to send us all traffic
+# (SnifferSysid); see MavRobot._on_gcs_command.
+_ROI_COMMANDS = (
+    mavlink.MAV_CMD_DO_SET_ROI_LOCATION,
+    mavlink.MAV_CMD_DO_SET_ROI_NONE,
+    mavlink.MAV_CMD_DO_SET_ROI,
+    mavlink.MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET,
+    mavlink.MAV_CMD_DO_SET_ROI_SYSID,
+    mavlink.MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW,
+)
+_AMSL_FRAMES = (mavlink.MAV_FRAME_GLOBAL, mavlink.MAV_FRAME_GLOBAL_INT)
+_ABOVE_HOME_FRAMES = (
+    mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+    mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+)
+_CLEARED = object()  # no ROI
+_UNPLACEABLE = object()  # an ROI that's active but that we can't put on the globe
 
 _FIX_TYPES: dict[int, GpsFixType] = {
     mavlink.GPS_FIX_TYPE_2D_FIX: "2d",
@@ -259,10 +278,12 @@ class MavGimbal(Gimbal):
         if yaw_lock:
             flags |= mavlink.GIMBAL_MANAGER_FLAGS_YAW_LOCK
         self._take_control()
-        self._robot_or_refuse()._command(
+        robot = self._robot_or_refuse()
+        robot._command(
             mavlink.MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW,
             (pitch, yaw, math.nan, math.nan, flags, 0, self.device_id),
         )
+        robot._show_roi(None)
 
     def _do_point_at(self, target: Offset) -> None:
         robot = self._robot_or_refuse()
@@ -276,10 +297,12 @@ class MavGimbal(Gimbal):
             y=round(lon * 1e7),
             z=height - robot._separation(),
         )
+        robot._show_roi(target)
 
     def _do_neutral(self) -> None:
         self._take_control()
-        self._robot_or_refuse()._command(
+        robot = self._robot_or_refuse()
+        robot._command(
             mavlink.MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW,
             (
                 math.nan,
@@ -291,10 +314,12 @@ class MavGimbal(Gimbal):
                 self.device_id,
             ),
         )
+        robot._show_roi(None)
 
     def _do_release(self) -> None:
         robot = self._robot_or_refuse()
         robot._command(mavlink.MAV_CMD_DO_SET_ROI_NONE, (self.device_id,))
+        robot._show_roi(None)
         if self.primary_control == (robot.sysid, robot.compid):
             robot._command(
                 mavlink.MAV_CMD_DO_GIMBAL_MANAGER_CONFIGURE,
@@ -343,6 +368,9 @@ class MavRobot(Robot):
     _last_gcs_heartbeat: float = 0.0
     _last_heartbeat_sent: float = 0.0
     _pending: dict[int, list[_AckWaiter]] = field(default_factory=dict)
+    # Other GCSs' ROI commands awaiting the FCU's ACK, by (their sysid, command):
+    # an ECEF target, _CLEARED or _UNPLACEABLE.
+    _gcs_roi: dict[tuple[int, int], Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def __post_init__(self):
@@ -434,6 +462,9 @@ class MavRobot(Robot):
         kind = msg.get_type()
         if kind == "HEARTBEAT":
             self._on_heartbeat(msg)
+            return
+        if kind in ("COMMAND_LONG", "COMMAND_INT"):
+            self._on_gcs_command(msg)
             return
         if msg.get_srcSystem() != self.target_sysid:
             return
@@ -597,7 +628,7 @@ class MavRobot(Robot):
     def _on_home_position(self, msg) -> None:
         self._home_amsl = msg.altitude / 1000
         if self._home is not None:
-            self._home.mount = Pose(Offset(msg.x, msg.y, msg.z))
+            self._home.mount = Pose(Offset(msg.x, msg.y, msg.z), orientation=None)
 
     def _on_battery_status(self, msg) -> None:
         cells = [v for v in msg.voltages if v != 65535]
@@ -625,16 +656,74 @@ class MavRobot(Robot):
             self._sysid_conflict = True
 
     def _on_command_ack(self, msg) -> None:
+        if msg.result == mavlink.MAV_RESULT_IN_PROGRESS:
+            return
         target = getattr(msg, "target_system", 0)
         if target not in (0, self.sysid):
-            return  # QGC's
-        if msg.result == mavlink.MAV_RESULT_IN_PROGRESS:
+            # Another GCS's: never an answer to ours, but it may settle an ROI.
+            roi = self._gcs_roi.pop((target, msg.command), None)
+            if roi is None or msg.result != mavlink.MAV_RESULT_ACCEPTED:
+                return
+            if roi is _UNPLACEABLE:
+                logger.info(
+                    "Sysid {} set an ROI we can't place ({}); not showing one",
+                    target,
+                    _enum_name("MAV_CMD", msg.command, "MAV_CMD_"),
+                )
+            self._show_roi(roi if isinstance(roi, Offset) else None)
             return
         with self._lock:
             waiters = self._pending.pop(msg.command, [])
         for waiter in waiters:
             waiter.result = msg.result
             waiter.event.set()
+
+    def _on_gcs_command(self, msg) -> None:
+        # Another GCS's command to the FCU: mavlink-router sends us all traffic
+        # (SnifferSysid in its config), not just what's addressed to us. Only
+        # ROI commands matter, and only once the FCU ACKs them as accepted.
+        if msg.command not in _ROI_COMMANDS or msg.get_srcSystem() == self.sysid:
+            return
+        if msg.target_system != self.target_sysid or msg.target_component not in (
+            0,
+            self.target_compid,
+        ):
+            return
+        self._gcs_roi[(msg.get_srcSystem(), msg.command)] = self._roi_of(msg)
+
+    def _roi_of(self, msg) -> Any:
+        """The ROI a COMMAND_LONG/INT leaves: an ECEF target, _CLEARED or _UNPLACEABLE."""
+        command = msg.command
+        if command in (
+            mavlink.MAV_CMD_DO_SET_ROI_NONE,
+            mavlink.MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW,  # pointing by angle ends the ROI
+        ):
+            return _CLEARED
+        if command == mavlink.MAV_CMD_DO_SET_ROI:  # deprecated; param1 is a MAV_ROI
+            if msg.param1 == mavlink.MAV_ROI_NONE:
+                return _CLEARED
+            if msg.param1 != mavlink.MAV_ROI_LOCATION:
+                return _UNPLACEABLE
+        elif command != mavlink.MAV_CMD_DO_SET_ROI_LOCATION:
+            return _UNPLACEABLE  # the next waypoint, or another system
+
+        if msg.get_type() == "COMMAND_INT":
+            lat, lon, alt, frame = msg.x / 1e7, msg.y / 1e7, msg.z, msg.frame
+        else:
+            # COMMAND_LONG has no frame: ArduPilot takes it above home, PX4 AMSL.
+            lat, lon, alt = msg.param5, msg.param6, msg.param7
+            frame = (
+                mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT
+                if self.autopilot == "ardupilot"
+                else mavlink.MAV_FRAME_GLOBAL
+            )
+        if frame in _AMSL_FRAMES:
+            amsl = alt
+        elif frame in _ABOVE_HOME_FRAMES and self._home_amsl is not None:
+            amsl = self._home_amsl + alt
+        else:
+            return _UNPLACEABLE  # above terrain, or home unknown yet
+        return Offset.from_geodetic(lat, lon, amsl + self._separation())
 
     # ── Outgoing messages ─────────────────────────────────────────────────────
 
@@ -807,9 +896,9 @@ class MavRobot(Robot):
         self._show_roi(target)
 
     def _show_roi(self, target: Offset | None) -> None:
-        # What we last set, not what the FCU is doing: no message reports the
-        # active ROI, so one set by QGC, a mission or Gimbal.point_at isn't shown.
+        # The last ROI command the FCU accepted, from us or another GCS: no
+        # message reports the active ROI, so one from a mission isn't shown.
         if self._roi is None:
             return
-        self._roi.mount = None if target is None else Pose(target)
+        self._roi.mount = None if target is None else Pose(target, orientation=None)
         self.roi = None if target is None else Link.to(self._roi)

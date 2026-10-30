@@ -64,10 +64,14 @@ MAVLink-specific `MavRobot`.
 - **`failsafe` is published only while `system_status` is CRITICAL or
   EMERGENCY** (which is how ArduPilot reports "any failsafe"); failsafe
   `STATUSTEXT`s only say which kind, defaulting to `other`.
-- **`roi` echoes what we set, not what the FCU is doing.** No MAVLink message
-  reports the active region of interest, so `Robot.roi` is the last ROI
-  `set_roi` got accepted, dropped by `clear_roi` or a reconnect. An ROI from
-  QGC or a mission doesn't show, and ours may already have been replaced.
+- **`roi` is the last ROI command the FCU accepted, not what it reports.** No
+  MAVLink message reports the active region of interest, so SpiriMav watches
+  the commands instead: its own, and other GCSs', which reach it because
+  mavlink-router is configured with `SnifferSysid` set to SpiriMav's sysid. A
+  command counts once the FCU ACKs it to its sender as accepted. Pointing by
+  angle ends the ROI, an ROI SpiriMav can't place hides it, and a reconnect
+  drops it. ROIs from a mission running on the FCU don't show; without the
+  sniffer setting, only SpiriMav's own do.
 - **Intent flows in as `@remote_method` RPCs** (`arm`, `set_mode`, `goto`,
   ...), never as field writes from mirrors: RPCs are acknowledged and can
   refuse. They act alongside QGC with no arbitration, as two GCSs on one
