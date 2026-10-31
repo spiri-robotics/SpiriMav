@@ -12,6 +12,12 @@
   don't show.
 - **The ROI and home are points**: their poses have no orientation (SpiriSynq 0.6.0), so they
   no longer show made-up angles.
+- **Camera lenses from MAVLink**: the field of view from `CAMERA_FOV_STATUS` (streamed at
+  1 Hz), or the focal length, sensor size and resolution from `CAMERA_INFORMATION`, go to
+  the SpiriCamera cameras on the camera's gimbal through their `set_intrinsics` RPC, as
+  the `mavlink` origin: when they change, and every 10 s for a camera that restarted.
+  `CAMERA_INFORMATION.gimbal_device_id` says which gimbal a camera is on; one on no
+  gimbal, or on one with no cameras configured, is left alone.
 
 ### Fixes
 

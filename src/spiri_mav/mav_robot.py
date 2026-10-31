@@ -30,6 +30,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+import zenoh
 from loguru import logger
 from pymavlink import mavutil
 from SpiriSynq.example_types.position import (
@@ -41,6 +42,7 @@ from SpiriSynq.example_types.position import (
     RootFrame,
 )
 from SpiriSynq.link import Link
+from SpiriSynq.remote_callables import RpcException, encode_parameters
 
 from spiri_mav.gimbal import Gimbal
 from spiri_mav.robot import (
@@ -80,7 +82,13 @@ STREAMS = {
     mavlink.MAVLINK_MSG_ID_GPS_GLOBAL_ORIGIN: 0.2,
     mavlink.MAVLINK_MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS: 10,
     mavlink.MAVLINK_MSG_ID_GIMBAL_MANAGER_STATUS: 1,
+    mavlink.MAVLINK_MSG_ID_CAMERA_FOV_STATUS: 1,
 }
+
+# Cameras' lenses, passed to the SpiriCamera cameras their gimbal carries.
+LENS_RESEND = 10.0  # s: re-sent this often, so a restarted camera gets it again
+LENS_RETRY = 1.0  # s before retrying a changed lens that didn't arrive
+LENS_TIMEOUT = 2.0  # s to wait for the camera's answer
 
 # The FCU's GCS sysid: ArduPilot's old and new names, PX4 doesn't have one.
 GCS_SYSID_PARAMS = ("SYSID_MYGCS", "MAV_GCS_SYSID")
@@ -188,6 +196,59 @@ def _open_link(url: str, sysid: int, compid: int):
 class _AckWaiter:
     event: threading.Event = field(default_factory=threading.Event)
     result: int | None = None
+
+
+@dataclass
+class _MavCamera:
+    """What MAVLink says about one camera: by its component and camera device id.
+
+    ArduPilot reports its own cameras from the autopilot, numbered by
+    camera_device_id; a MAVLink camera reports from a component of its own,
+    with camera_device_id 0.
+    """
+
+    gimbal_id: int | None = None  # from CAMERA_INFORMATION; 0 is on no gimbal
+    model: dict[str, float] | None = None  # CAMERA_INFORMATION's focal length etc.
+    fov: dict[str, float] | None = None  # CAMERA_FOV_STATUS's
+    sent: dict[str, float] | None = None  # what the cameras last accepted
+    attempted: float = -math.inf  # monotonic time of the last attempt
+    complaint: str = ""
+
+    @property
+    def lens(self) -> dict[str, float] | None:
+        """``set_intrinsics`` arguments. The FOV is the live one, after zoom."""
+        return self.fov or self.model
+
+
+def _lens_from_information(msg) -> dict[str, float] | None:
+    # NaN or 0 for what the camera doesn't know, which ArduPilot's own
+    # cameras send for all of these; only a camera that knows its lens fills them.
+    if not (
+        msg.focal_length > 0
+        and msg.sensor_size_h > 0
+        and msg.resolution_h > 0
+        and msg.resolution_v > 0
+    ):
+        return None
+    fx = msg.focal_length / msg.sensor_size_h * msg.resolution_h
+    fy = (
+        msg.focal_length / msg.sensor_size_v * msg.resolution_v
+        if msg.sensor_size_v > 0
+        else fx
+    )
+    return {
+        "width": msg.resolution_h,
+        "height": msg.resolution_v,
+        "fx": round(fx, 3),
+        "fy": round(fy, 3),
+    }
+
+
+def _lens_from_fov_status(msg) -> dict[str, float] | None:
+    if not 0 < msg.hfov < 180:  # NaN: unknown
+        return None
+    vfov = msg.vfov if 0 < msg.vfov < 180 else 0.0
+    return {"hfov": round(msg.hfov, 3), "vfov": round(vfov, 3)}
 
 
 def _inverse(q: Orientation) -> Orientation:
@@ -353,6 +414,9 @@ class MavRobot(Robot):
     _gimbal_cameras: dict[int, tuple[Link, ...]] = field(
         default_factory=dict
     )  # config: MAVLink doesn't say
+    # By (compid, camera_device_id).
+    _mav_cameras: dict[tuple[int, int], _MavCamera] = field(default_factory=dict)
+    _lens_sender: threading.Thread | None = None
     _mav_type: int | None = None
     _local: Offset | None = None
     _attitude: Orientation | None = None
@@ -456,6 +520,7 @@ class MavRobot(Robot):
             self.connected = False
         if self.gcs_seen and now - self._last_gcs_heartbeat > GCS_TIMEOUT:
             self.gcs_seen = False
+        self._send_lenses(now)
 
     def handle(self, msg) -> None:
         """Apply one MAVLink message."""
@@ -471,6 +536,10 @@ class MavRobot(Robot):
         if kind.startswith("GIMBAL_"):
             # A gimbal device may be a component of its own, not the autopilot.
             self._on_gimbal_message(msg)
+            return
+        if kind in ("CAMERA_INFORMATION", "CAMERA_FOV_STATUS"):
+            # So may a camera.
+            self._on_camera_message(msg)
             return
         if msg.get_srcComponent() != self.target_compid:
             return
@@ -496,6 +565,27 @@ class MavRobot(Robot):
             self._gimbals[device_id] = gimbal
             self.gimbals = tuple(Link.to(g) for _, g in sorted(self._gimbals.items()))
         gimbal.handle(msg)
+
+    def _on_camera_message(self, msg) -> None:
+        compid = msg.get_srcComponent()
+        key = (compid, getattr(msg, "camera_device_id", 0))
+        camera = self._mav_cameras.get(key)
+        if camera is None:
+            camera = self._mav_cameras[key] = _MavCamera()
+            if msg.get_type() != "CAMERA_INFORMATION":
+                # Which gimbal it's on, so which cameras its lens is for.
+                self._request_camera_information(compid)
+        if msg.get_type() == "CAMERA_INFORMATION":
+            camera.gimbal_id = getattr(msg, "gimbal_device_id", 0)
+            camera.model = _lens_from_information(msg)
+            if not self._gimbal_cameras.get(camera.gimbal_id):
+                logger.info(
+                    "MAVLink camera {} is on gimbal {}, which carries no SpiriCamera camera",
+                    key,
+                    camera.gimbal_id,
+                )
+        else:
+            camera.fov = _lens_from_fov_status(msg)
 
     # ── Incoming messages ─────────────────────────────────────────────────────
 
@@ -742,6 +832,80 @@ class MavRobot(Robot):
             mavlink.MAV_CMD_REQUEST_MESSAGE,
             (mavlink.MAVLINK_MSG_ID_GIMBAL_MANAGER_INFORMATION,),
         )
+        # From every component: cameras may be components of their own.
+        self._request_camera_information(0)
+
+    def _request_camera_information(self, compid: int) -> None:
+        self._conn.mav.command_long_send(
+            self.target_sysid,
+            compid,
+            mavlink.MAV_CMD_REQUEST_MESSAGE,
+            0,
+            mavlink.MAVLINK_MSG_ID_CAMERA_INFORMATION,
+            *(0.0,) * 6,
+        )
+
+    def _send_lenses(self, now: float) -> None:
+        """Pass each camera's lens to the SpiriCamera cameras on its gimbal.
+
+        Sent when it changes and every LENS_RESEND, from a thread of its own:
+        it's an RPC, and this runs on the thread that reads the link.
+        """
+        if self._lens_sender is not None and self._lens_sender.is_alive():
+            return
+        due = []
+        for camera in self._mav_cameras.values():
+            lens = camera.lens
+            topics = self._gimbal_cameras.get(camera.gimbal_id or 0, ())
+            if lens is None or not topics:
+                continue
+            wait = LENS_RESEND if lens == camera.sent else LENS_RETRY
+            if now - camera.attempted >= wait:
+                camera.attempted = now
+                due.append((camera, lens, topics))
+        if due:
+            self._lens_sender = threading.Thread(
+                target=self._deliver_lenses, args=(due,), name="lens", daemon=True
+            )
+            self._lens_sender.start()
+
+    def _deliver_lenses(self, due) -> None:
+        for camera, lens, topics in due:
+            try:
+                for link in topics:
+                    self._set_intrinsics(link.topic, lens)
+            except (LookupError, RpcException, zenoh.ZError) as e:
+                if str(e) != camera.complaint:
+                    logger.warning("Lens {} not passed on: {}", lens, e)
+                camera.complaint = str(e)
+                continue
+            if lens != camera.sent or camera.complaint:
+                logger.info(
+                    "Lens {} passed to {}", lens, ", ".join(t.topic for t in topics)
+                )
+            camera.sent, camera.complaint = lens, ""
+
+    def _set_intrinsics(self, topic: str, lens: dict[str, float]) -> None:
+        """Call SpiriCamera's ``Camera.set_intrinsics`` at *topic*, as MAVLink's origin.
+
+        By topic, with plain numbers, so SpiriMav needn't depend on SpiriCamera.
+        """
+        registry = self.synq_session.type_registry
+        params = {"origin": "mavlink", **lens}
+        selector = zenoh.Selector(
+            f"{topic}/set_intrinsics",
+            encode_parameters(
+                {k: registry.dumps(v).removesuffix("\n...") for k, v in params.items()}
+            ),
+        )
+        replies = list(
+            self.synq_session.zenoh_session.get(selector, timeout=LENS_TIMEOUT)
+        )
+        if not replies:
+            raise LookupError(f"no camera answered at {topic}")
+        for reply in replies:
+            if reply.err is not None:
+                raise RpcException(reply.err.payload.to_string(), topic=topic)
 
     def _send_heartbeat(self) -> None:
         if self._conn is None or self._sysid_conflict:

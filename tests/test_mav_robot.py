@@ -11,7 +11,9 @@ import pytest
 from pymavlink import mavutil
 from SpiriSynq.example_types.position import Offset, Orientation
 from SpiriSynq.link import Link
+from SpiriSynq.remote_callables import decode_parameters
 
+from spiri_mav import mav_robot
 from spiri_mav.gimbal import Gimbal
 from spiri_mav.mav_robot import MavRobot, classify_failsafe_text
 from spiri_mav.robot import Battery, CommandRefused, GpsFix, Robot, Velocity
@@ -837,3 +839,206 @@ def test_configured_cameras_attach_to_their_gimbal():
         assert robot._gimbals[2].cameras == ()
     finally:
         robot.close()
+
+
+# ── Camera lenses ────────────────────────────────────────────────────────────
+
+NAN = float("nan")
+
+
+def camera_information(
+    gimbal_device_id=1,
+    focal_length=NAN,
+    sensor=(NAN, NAN),
+    resolution=(0, 0),
+    camera_device_id=0,
+    src=FCU,
+):
+    return from_src(
+        "camera_information",
+        0,
+        [0] * 32,
+        [0] * 32,
+        0,
+        focal_length,
+        *sensor,
+        *resolution,
+        0,
+        0,
+        0,
+        b"",
+        gimbal_device_id,
+        camera_device_id,
+        src=src,
+    )
+
+
+def camera_fov_status(hfov=114.59, vfov=98.86, camera_device_id=0, src=FCU):
+    big = 2**31 - 1
+    return from_src(
+        "camera_fov_status",
+        0,
+        0,
+        0,
+        0,
+        big,
+        big,
+        big,
+        [1, 0, 0, 0],
+        hfov,
+        vfov,
+        camera_device_id,
+        src=src,
+    )
+
+
+@pytest.fixture
+def fake_camera(synq_session):
+    """A SpiriCamera camera's set_intrinsics, at test/camera1: records each call."""
+    calls: list[dict] = []
+    refuse: list[str] = []
+
+    def answer(query):
+        params = {
+            k: synq_session.type_registry.load(v)
+            for k, v in decode_parameters(query).items()
+        }
+        calls.append(params)
+        if refuse:
+            query.reply_err(refuse[0])
+        else:
+            query.reply(query.key_expr, payload="null")
+
+    queryable = synq_session.zenoh_session.declare_queryable(
+        "test/camera1/set_intrinsics", answer
+    )
+    yield calls, refuse
+    queryable.undeclare()
+
+
+@pytest.fixture
+def with_camera(fake_camera):
+    r = MavRobot(
+        "test/robot",
+        synq_authoritive=True,
+        _gimbal_cameras={1: (Link("test/camera1"),)},
+    )
+    r._conn = FakeLink(r.sysid, r.compid)
+    r.handle(heartbeat())
+    yield r, fake_camera[0], fake_camera[1]
+    r.close()
+
+
+def test_connect_streams_fov_and_asks_every_component_for_cameras(connected):
+    commands = connected._conn.of_type("COMMAND_LONG")
+    assert any(
+        m.command == mavlink.MAV_CMD_SET_MESSAGE_INTERVAL
+        and int(m.param1) == mavlink.MAVLINK_MSG_ID_CAMERA_FOV_STATUS
+        for m in commands
+    )
+    assert any(
+        m.command == mavlink.MAV_CMD_REQUEST_MESSAGE
+        and int(m.param1) == mavlink.MAVLINK_MSG_ID_CAMERA_INFORMATION
+        and m.target_component == 0
+        for m in commands
+    )
+
+
+def test_ardupilot_fov_reaches_the_gimbals_camera(with_camera):
+    # As ArduPilot sends them with CAMn_HFOV/VFOV set: FOV, and no lens.
+    robot, calls, _ = with_camera
+    robot.handle(camera_information())
+    robot.handle(camera_fov_status())
+    robot.tick()
+    assert _wait_for(lambda: calls)
+    assert calls == [{"origin": "mavlink", "hfov": 114.59, "vfov": 98.86}]
+
+
+def test_lens_from_camera_information(with_camera):
+    # A 1/2.3" sensor, 4.5 mm lens, 1920x1080.
+    robot, calls, _ = with_camera
+    camera = (1, mavlink.MAV_COMP_ID_CAMERA)
+    robot.handle(
+        camera_information(
+            focal_length=4.5, sensor=(6.17, 4.55), resolution=(1920, 1080), src=camera
+        )
+    )
+    robot.tick()
+    assert _wait_for(lambda: calls)
+    assert calls[0]["origin"] == "mavlink"
+    assert (calls[0]["width"], calls[0]["height"]) == (1920, 1080)
+    assert calls[0]["fx"] == pytest.approx(4.5 / 6.17 * 1920, abs=0.01)
+    assert calls[0]["fy"] == pytest.approx(4.5 / 4.55 * 1080, abs=0.01)
+
+
+def test_fov_waits_to_know_the_gimbal(with_camera):
+    robot, calls, _ = with_camera
+    robot.handle(camera_fov_status())
+    robot.tick()
+    time.sleep(0.1)
+    assert calls == []
+    # And asked the camera which gimbal it's on.
+    assert any(
+        m.command == mavlink.MAV_CMD_REQUEST_MESSAGE
+        and int(m.param1) == mavlink.MAVLINK_MSG_ID_CAMERA_INFORMATION
+        and m.target_component == FCU[1]
+        for m in robot._conn.of_type("COMMAND_LONG")
+    )
+
+
+def test_a_camera_on_another_gimbal_gets_nothing(with_camera):
+    robot, calls, _ = with_camera
+    robot.handle(camera_information(gimbal_device_id=2))
+    robot.handle(camera_fov_status())
+    robot.tick()
+    time.sleep(0.1)
+    assert calls == []
+
+
+def test_lens_is_resent_only_when_changed_or_due(with_camera):
+    robot, calls, _ = with_camera
+    robot.handle(camera_information())
+    robot.handle(camera_fov_status())
+    now = time.monotonic()
+    robot.tick(now)
+    assert _wait_for(lambda: len(calls) == 1)
+    robot._lens_sender.join()
+
+    robot.tick(now + 1)
+    time.sleep(0.1)
+    assert len(calls) == 1
+
+    robot.handle(camera_fov_status(hfov=60, vfov=40))  # zoomed in
+    robot.tick(now + 1.1)
+    assert _wait_for(lambda: len(calls) == 2)
+    assert calls[1]["hfov"] == 60
+    robot._lens_sender.join()
+
+    robot.tick(now + 1.1 + mav_robot.LENS_RESEND)
+    assert _wait_for(lambda: len(calls) == 3)
+
+
+def test_refused_lens_is_retried(with_camera):
+    robot, calls, refuse = with_camera
+    refuse.append("RPC error 'bad lens'")
+    robot.handle(camera_information())
+    robot.handle(camera_fov_status())
+    now = time.monotonic()
+    robot.tick(now)
+    assert _wait_for(lambda: len(calls) == 1)
+    robot._lens_sender.join()
+
+    refuse.clear()
+    robot.tick(now + mav_robot.LENS_RETRY)
+    assert _wait_for(lambda: len(calls) == 2)
+    robot._lens_sender.join()
+    assert robot._mav_cameras[(FCU[1], 0)].sent == {"hfov": 114.59, "vfov": 98.86}
+
+
+def test_unknown_fov_sends_nothing(with_camera):
+    robot, calls, _ = with_camera
+    robot.handle(camera_information())
+    robot.handle(camera_fov_status(hfov=NAN, vfov=NAN))
+    robot.tick()
+    time.sleep(0.1)
+    assert calls == []
