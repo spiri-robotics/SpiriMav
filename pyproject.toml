@@ -38,4 +38,7 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "coverage>=7.0.0",
+    # SpiriCamera's minimum, so HUD templates are tested as any camera may
+    # render them.
+    "minijinja>=3.0.5",
 ]

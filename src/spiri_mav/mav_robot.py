@@ -12,7 +12,9 @@ The robot hangs in the frame tree under the autopilot's EKF origin::
 so autopilot telemetry goes into mounts unconverted, and the part of the tree
 below the origin works without GPS. The origin, home and ROI are sibling topics,
 not ``<robot>/origin``: an object's subscriber on ``<robot>/**`` would
-otherwise receive every put of the objects nested under it.
+otherwise receive every put of the objects nested under it. So is the HUD's
+``<robot>_instruments``; its generic widgets are at ``hud/widgets/<name>``,
+any camera's to show (see :mod:`spiri_mav.hud`).
 
 Safety rules from ``docs/design.md`` that this module enforces: the companion
 heartbeats as its own system and refuses to heartbeat or command if that
@@ -44,7 +46,15 @@ from SpiriSynq.example_types.position import (
 from SpiriSynq.link import Link
 from SpiriSynq.remote_callables import RpcException, encode_parameters
 
-from spiri_mav.gimbal import Gimbal
+from spiri_mav.gimbal import BearingDetection, Gimbal
+from spiri_mav.hud import (
+    HudWidget,
+    Instruments,
+    gimbal_widget,
+    marker_widget,
+    rangefinder_widget,
+    robot_widgets,
+)
 from spiri_mav.robot import (
     Battery,
     BatteryState,
@@ -84,6 +94,10 @@ STREAMS = {
     mavlink.MAVLINK_MSG_ID_GIMBAL_MANAGER_STATUS: 1,
     mavlink.MAVLINK_MSG_ID_CAMERA_FOV_STATUS: 1,
 }
+# DISTANCE_SENSOR, in Hz, when a gimbal has a rangefinder.
+RANGEFINDER_HZ = 10
+RANGEFINDER_TIMEOUT = 2.0  # s without a reading before a gimbal's goes to None
+HUD_PERIOD = 0.1  # s between updates of the HUD's instruments
 
 # Cameras' lenses, passed to the SpiriCamera cameras their gimbal carries.
 LENS_RESEND = 10.0  # s: re-sent this often, so a restarted camera gets it again
@@ -414,9 +428,25 @@ class MavRobot(Robot):
     _gimbal_cameras: dict[int, tuple[Link, ...]] = field(
         default_factory=dict
     )  # config: MAVLink doesn't say
+    # Which DISTANCE_SENSOR id each gimbal's rangefinder is, by gimbal device
+    # id: config, as ArduPilot reports a rangefinder as fixed to the airframe.
+    _gimbal_rangefinders: dict[int, int] = field(default_factory=dict)
+    # By gimbal device id: each rangefinder's spot, from its first report,
+    # and when it last read.
+    _spots: dict[int, BearingDetection] = field(default_factory=dict)
+    _last_range: dict[int, float] = field(default_factory=dict)
+    # Config, as MAVLink doesn't report them; None leaves them unknown. ± deg
+    # off a gimbal's axis, and ± (m, m per m of distance) for a rangefinder.
+    _pointing_accuracy: float | None = None
+    _range_accuracy: tuple[float, float] | None = None
     # By (compid, camera_device_id).
     _mav_cameras: dict[tuple[int, int], _MavCamera] = field(default_factory=dict)
     _lens_sender: threading.Thread | None = None
+    # The HUD: what its widgets read, and the widgets, the robot's and its
+    # gimbals' (spiri_mav.hud).
+    _instruments: Instruments | None = None
+    _hud: list[HudWidget] = field(default_factory=list)
+    _last_hud: float = 0.0
     _mav_type: int | None = None
     _local: Offset | None = None
     _attitude: Orientation | None = None
@@ -458,9 +488,25 @@ class MavRobot(Robot):
             relative_to=RootFrame("ECEF"),
         )
         self.relative_to = Link.to(self._origin)
+        self._instruments = Instruments(
+            f"{self.synq_topic}_instruments", synq_authoritive=True
+        )
+        self._hud = robot_widgets(self._instruments)
+        self._hud += [
+            marker_widget("home", self._home),
+            marker_widget("roi", self._roi),
+        ]
 
     def close(self):
-        for child in (*self._gimbals.values(), self._home, self._roi, self._origin):
+        for child in (
+            *self._hud,
+            self._instruments,
+            *self._spots.values(),
+            *self._gimbals.values(),
+            self._home,
+            self._roi,
+            self._origin,
+        ):
             if child is not None:
                 child.close()
         super().close()
@@ -520,7 +566,21 @@ class MavRobot(Robot):
             self.connected = False
         if self.gcs_seen and now - self._last_gcs_heartbeat > GCS_TIMEOUT:
             self.gcs_seen = False
+        for device_id, last in list(self._last_range.items()):
+            if now - last > RANGEFINDER_TIMEOUT:
+                del self._last_range[device_id]
+                self._spots[device_id].set_reading(None)
         self._send_lenses(now)
+        if self._instruments is not None and now - self._last_hud >= HUD_PERIOD:
+            self._last_hud = now
+            self._instruments.update(
+                self,
+                self._home.mount if self._home is not None else None,
+                [
+                    (device_id, gimbal, self._spots.get(device_id))
+                    for device_id, gimbal in sorted(self._gimbals.items())
+                ],
+            )
 
     def handle(self, msg) -> None:
         """Apply one MAVLink message."""
@@ -561,10 +621,67 @@ class MavRobot(Robot):
                 device_id=device_id,
                 _robot=self,
                 cameras=self._gimbal_cameras.get(device_id, ()),
+                pointing_accuracy=self._pointing_accuracy,
             )
             self._gimbals[device_id] = gimbal
             self.gimbals = tuple(Link.to(g) for _, g in sorted(self._gimbals.items()))
+            self._hud.append(gimbal_widget(device_id, self._instruments))
         gimbal.handle(msg)
+
+    def _on_distance_sensor(self, msg) -> None:
+        # Centimetres. ArduPilot sends a reading past either limit as it is,
+        # or saturated at UINT16_MAX when nothing came back.
+        for device_id, sensor_id in self._gimbal_rangefinders.items():
+            if sensor_id != msg.id or device_id not in self._gimbals:
+                continue
+            spot = self._spots.get(device_id) or self._add_rangefinder(device_id)
+            if spot is None:
+                continue
+            if msg.current_distance < msg.min_distance:
+                status, distance = "near", None
+            elif msg.current_distance > msg.max_distance:
+                status, distance = "far", None
+            else:
+                status, distance = "ok", msg.current_distance / 100
+            if distance is not None and self._range_accuracy is not None:
+                fixed, per_m = self._range_accuracy
+                spot.range_accuracy = fixed + per_m * distance
+            spot.set_reading(
+                status,
+                distance,
+                msg.min_distance / 100,
+                msg.max_distance / 100,
+                elevation=self._gimbals[device_id].pitch,
+            )
+            self._last_range[device_id] = time.monotonic()
+
+    def _add_rangefinder(self, device_id: int) -> BearingDetection | None:
+        """Gimbal *device_id*'s rangefinder, now that its sensor has reported.
+
+        Config says which sensor is whose, but only a report says there is
+        one: until then the gimbal has no rangefinder, spot or widget.
+        """
+        if not self.synq_authoritive:
+            return None
+        gimbal = self._gimbals[device_id]
+        # A sibling topic, not nested, as the gimbal is the robot's.
+        spot = BearingDetection(
+            f"{gimbal.synq_topic}_range",
+            synq_authoritive=True,
+            relative_to=Link.to(gimbal),
+            pointing_accuracy=self._pointing_accuracy,
+        )
+        self._spots[device_id] = spot
+        gimbal.rangefinder = Link.to(spot)
+        self._hud.append(
+            rangefinder_widget(gimbal.synq_topic, device_id, self._instruments)
+        )
+        logger.info(
+            "Gimbal {} has a rangefinder, DISTANCE_SENSOR {}",
+            device_id,
+            self._gimbal_rangefinders[device_id],
+        )
+        return spot
 
     def _on_camera_message(self, msg) -> None:
         compid = msg.get_srcComponent()
@@ -824,7 +941,10 @@ class MavRobot(Robot):
             self._conn.mav.param_request_read_send(
                 self.target_sysid, self.target_compid, name.encode(), -1
             )
-        for message_id, hz in STREAMS.items():
+        streams = dict(STREAMS)
+        if self._gimbal_rangefinders:
+            streams[mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR] = RANGEFINDER_HZ
+        for message_id, hz in streams.items():
             self._send_command_long(
                 mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, (message_id, 1e6 / hz)
             )

@@ -14,7 +14,7 @@ from SpiriSynq.link import Link
 from SpiriSynq.remote_callables import decode_parameters
 
 from spiri_mav import mav_robot
-from spiri_mav.gimbal import Gimbal
+from spiri_mav.gimbal import BearingDetection, Gimbal, beam_accuracy
 from spiri_mav.mav_robot import MavRobot, classify_failsafe_text
 from spiri_mav.robot import Battery, CommandRefused, GpsFix, Robot, Velocity
 
@@ -839,6 +839,150 @@ def test_configured_cameras_attach_to_their_gimbal():
         assert robot._gimbals[2].cameras == ()
     finally:
         robot.close()
+
+
+# ── Gimbal rangefinders ──────────────────────────────────────────────────────
+
+
+def distance_sensor(current, sensor_id=0, min_cm=20, max_cm=65000):
+    return from_src(
+        "distance_sensor",
+        0,
+        min_cm,
+        max_cm,
+        current,
+        mavlink.MAV_DISTANCE_SENSOR_LASER,
+        sensor_id,
+        mavlink.MAV_SENSOR_ROTATION_NONE,
+        0,
+    )
+
+
+@pytest.fixture
+def ranged():
+    """A connected robot whose gimbal 154 has DISTANCE_SENSOR 0 as its rangefinder."""
+    robot = MavRobot(
+        "test/robot_rng", synq_authoritive=True, _gimbal_rangefinders={154: 0}
+    )
+    robot._conn = FakeLink(robot.sysid, robot.compid)
+    robot.handle(heartbeat())
+    robot_attitude(robot)
+    robot.handle(gimbal_attitude(Orientation()))
+    yield robot
+    robot.close()
+
+
+def test_rangefinder_appears_when_its_sensor_reports(ranged):
+    gimbal = ranged._gimbals[154]
+    # Configured, but nothing says there's a rangefinder yet.
+    assert ranged._spots == {} and gimbal.rangefinder is None
+    ranged.handle(distance_sensor(1234))
+    spot = ranged._spots[154]
+    assert spot.synq_topic == "test/robot_rng_gimbal154_range"
+    assert spot.relative_to == Link.to(gimbal)
+    assert gimbal.rangefinder == Link.to(spot)
+    assert ranged._hud[-1].synq_topic == "test/robot_rng_gimbal154_range_hud"
+
+
+def test_rangefinder_waits_for_its_gimbal(robot):
+    robot._gimbal_rangefinders = {154: 0}
+    robot.handle(heartbeat())
+    robot.handle(distance_sensor(1234))
+    assert robot._spots == {}  # nothing to hang it under yet
+    robot_attitude(robot)
+    robot.handle(gimbal_attitude(Orientation()))
+    robot.handle(distance_sensor(1234))
+    assert robot._spots[154].distance == 12.34
+
+
+def test_rangefinder_reading_places_the_spot(ranged):
+    ranged.handle(distance_sensor(1234))
+    ranged.handle(distance_sensor(500, sensor_id=1))  # someone else's
+    spot = ranged._spots[154]
+    assert (spot.status, spot.distance, spot.min, spot.max) == ("ok", 12.34, 0.2, 650.0)
+    # A point along the gimbal's x axis.
+    assert spot.mount.offset == Offset(x=12.34)
+    assert spot.mount.orientation is None
+
+
+@pytest.mark.parametrize(
+    "current, status",
+    [(9, "near"), (65535, "far"), (20, "ok"), (65000, "ok")],
+)
+def test_rangefinder_out_of_range(ranged, current, status):
+    ranged.handle(distance_sensor(current))
+    spot = ranged._spots[154]
+    assert spot.status == status
+    # No return, no spot.
+    assert (spot.mount is None) == (status != "ok")
+
+
+def test_rangefinder_goes_silent(ranged):
+    ranged.handle(distance_sensor(1234))
+    ranged.tick(time.monotonic() + mav_robot.RANGEFINDER_TIMEOUT + 1)
+    spot = ranged._spots[154]
+    assert spot.status is None and spot.mount is None
+
+
+def test_rangefinder_is_streamed_only_when_configured(robot, ranged):
+    def streamed(r):
+        return {
+            int(m.param1)
+            for m in r._conn.of_type("COMMAND_LONG")
+            if m.command == mavlink.MAV_CMD_SET_MESSAGE_INTERVAL
+        }
+
+    robot.handle(heartbeat())
+    assert mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR not in streamed(robot)
+    assert mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR in streamed(ranged)
+
+
+def test_rangefinder_spot_reaches_mirrors(ranged):
+    ranged.handle(distance_sensor(1234))
+    mirror = BearingDetection.from_topic(ranged._spots[154].synq_absolute_path)
+    assert (mirror.status, mirror.distance) == ("ok", 12.34)
+    assert mirror.mount.offset == Offset(x=12.34)
+
+
+def test_configured_accuracies_place_the_spot_in_the_tree():
+    robot = MavRobot(
+        "test/robot_acc",
+        synq_authoritive=True,
+        _gimbal_rangefinders={154: 0},
+        _pointing_accuracy=1.0,
+        _range_accuracy=(1.0, 0.0025),
+    )
+    robot._conn = FakeLink(robot.sysid, robot.compid)
+    try:
+        robot.handle(heartbeat())
+        robot.handle(from_src("gps_global_origin", 450000000, -750000000, 0))
+        robot.handle(from_src("local_position_ned", 0, 0, 0, -10, 0, 0, 0))
+        robot_attitude(robot)
+        robot.handle(gimbal_attitude(Orientation()))  # level
+        robot.handle(distance_sensor(40000))
+        gimbal, spot = robot._gimbals[154], robot._spots[154]
+        assert gimbal.pointing_accuracy == spot.pointing_accuracy == 1.0
+        assert spot.range_accuracy == pytest.approx(2.0)  # 1 m + 0.25% of 400 m
+        assert spot.mount.accuracy == beam_accuracy(400, 0, 2.0, 1.0)
+        # The spot's pose is in the tree, 400 m ahead of the gimbal.
+        assert _wait_for(lambda: spot.pose is not None and gimbal.pose is not None)
+        ahead = spot.pose.offset - gimbal.pose.offset
+        assert math.hypot(ahead.x, ahead.y, ahead.z) == pytest.approx(400, abs=0.01)
+        assert spot.pose.accuracy is not None
+    finally:
+        robot.close()
+
+
+def test_beam_accuracy():
+    side = 100 * math.tan(math.radians(1))  # 1° off at 100 m
+    level = beam_accuracy(100, 0, 1.0, 1.0)
+    assert level.horizontal == pytest.approx(math.hypot(1.0, side))
+    assert level.vertical == pytest.approx(side)
+    down = beam_accuracy(100, -90, 1.0, 1.0)  # straight down: the range error is height
+    assert down.horizontal == pytest.approx(side)
+    assert down.vertical == pytest.approx(1.0)
+    assert beam_accuracy(100, 0, None, None) is None
+    assert beam_accuracy(100, None, 1.0, None).horizontal == pytest.approx(1.0)
 
 
 # ── Camera lenses ────────────────────────────────────────────────────────────

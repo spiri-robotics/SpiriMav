@@ -53,8 +53,12 @@ def test_serve_closes_robot_on_interrupt(monkeypatch) -> None:
     from spiri_mav.mav_robot import MavRobot
 
     calls = []
+    # Kept alive, so the only close is serve's: collecting it would close it
+    # again (SyncableObject.__del__).
+    robots = []
 
     def fake_run(self, url, stop=None):
+        robots.append(self)
         calls.append((self.synq_topic, self.sysid, url))
         raise KeyboardInterrupt
 

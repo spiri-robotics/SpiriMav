@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     # Which SpiriCamera cameras each gimbal carries, by gimbal device id: MAVLink
     # doesn't say. JSON in the environment, e.g. {"1": ["mu-1/camera_eo"]}.
     gimbal_cameras: dict[int, list[str]] = {}
+    # Which DISTANCE_SENSOR id is each gimbal's rangefinder, by gimbal device
+    # id: ArduPilot reports one as fixed to the airframe. E.g. {"1": 0}.
+    gimbal_rangefinders: dict[int, int] = {}
+    # What MAVLink doesn't report, as 90% bounds; estimates until a datasheet
+    # says otherwise. Pointing: where the gimbal thinks it points, off its
+    # axis, mostly the vehicle's compass heading (~2° across). Rangefinder: a
+    # ZT30-class laser's ±1 m, plus 0.25% of the distance past 100 m, taken
+    # here as from the start.
+    gimbal_pointing_accuracy: float = 1.0  # ± deg
+    rangefinder_accuracy: float = 1.0  # ± m
+    rangefinder_accuracy_per_m: float = 0.0025  # ± m per m of distance
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -82,6 +93,12 @@ def serve(settings: Settings, stop: threading.Event | None = None) -> None:
             device_id: tuple(Link(topic) for topic in topics)
             for device_id, topics in settings.gimbal_cameras.items()
         },
+        _gimbal_rangefinders=settings.gimbal_rangefinders,
+        _pointing_accuracy=settings.gimbal_pointing_accuracy,
+        _range_accuracy=(
+            settings.rangefinder_accuracy,
+            settings.rangefinder_accuracy_per_m,
+        ),
     )
     logger.info("Publishing robot at {}", robot.synq_absolute_path)
     try:
