@@ -37,6 +37,13 @@ def robot():
 
 
 @pytest.fixture
+def t0():
+    """Now, on the clock the robot stamps messages with: ticks are after it,
+    as a fixed time could be before a fresh CI runner's uptime."""
+    return time.monotonic()
+
+
+@pytest.fixture
 def connected(robot):
     robot.handle(heartbeat())
     return robot
@@ -55,7 +62,7 @@ def home_at(robot, down: float):
     )
 
 
-def test_instruments_follow_the_robot(connected):
+def test_instruments_follow_the_robot(connected, t0):
     connected.handle(heartbeat(armed=True, custom_mode=4))
     connected.handle(from_src("local_position_ned", 0, 0.0, 0.0, -12.0, 3.0, 4.0, -1.0))
     robot_attitude(connected, roll=10, pitch=-5, yaw=-90)
@@ -67,7 +74,7 @@ def test_instruments_follow_the_robot(connected):
     )
     cells = [4200, 4100, 4000] + [65535] * 7
     connected.handle(from_src("battery_status", 0, 0, 0, 2500, cells, 1000, -1, -1, 70))
-    connected.tick(100.0)
+    connected.tick(t0)
 
     i = connected._instruments
     assert (i.connected, i.armed, i.mode) == (True, True, "GUIDED")
@@ -80,24 +87,24 @@ def test_instruments_follow_the_robot(connected):
     )
 
 
-def test_instruments_unknown_until_reported(connected):
-    connected.tick(100.0)
+def test_instruments_unknown_until_reported(connected, t0):
+    connected.tick(t0)
     i = connected._instruments
     assert i.connected
     assert None is i.roll is i.heading is i.altitude is i.climb is i.gps_fix
     assert i.batteries == i.gimbals == ()
 
 
-def test_no_altitude_without_home(connected):
+def test_no_altitude_without_home(connected, t0):
     connected.handle(from_src("local_position_ned", 0, 0.0, 0.0, -12.0, 0, 0, 0))
-    connected.tick(100.0)
+    connected.tick(t0)
     assert connected._instruments.altitude is None
 
 
-def test_heading_wraps_to_north(connected):
+def test_heading_wraps_to_north(connected, t0):
     robot_attitude(connected, yaw=-0.01)
     connected.handle(from_src("local_position_ned", 0, 0.0, 0.0, 0.0, 0, 0, 0))
-    connected.tick(100.0)
+    connected.tick(t0)
     assert connected._instruments.heading == 0.0
 
 
@@ -112,22 +119,22 @@ def test_link_down_leaves_nothing_known(connected):
     assert i.batteries == ()
 
 
-def test_instruments_update_at_most_every_period(connected):
+def test_instruments_update_at_most_every_period(connected, t0):
     robot_attitude(connected, roll=10)
     connected.handle(from_src("local_position_ned", 0, 0.0, 0.0, 0.0, 0, 0, 0))
-    connected.tick(100.0)
+    connected.tick(t0)
     robot_attitude(connected, roll=20)
-    connected.tick(100.0 + mav_robot.HUD_PERIOD / 2)
+    connected.tick(t0 + mav_robot.HUD_PERIOD / 2)
     assert connected._instruments.roll == 10.0
-    connected.tick(100.0 + mav_robot.HUD_PERIOD * 1.01)
+    connected.tick(t0 + mav_robot.HUD_PERIOD * 1.01)
     assert connected._instruments.roll == 20.0
 
 
-def test_gimbals_are_in_the_instruments_and_get_a_widget(connected):
+def test_gimbals_are_in_the_instruments_and_get_a_widget(connected, t0):
     robot_attitude(connected)
     q = Orientation.from_euler(0, math.radians(-30), math.radians(20))
     connected.handle(gimbal_attitude(q))
-    connected.tick(100.0)
+    connected.tick(t0)
     [device_id] = connected._gimbals
     assert connected._instruments.gimbals == (
         {
@@ -143,18 +150,18 @@ def test_gimbals_are_in_the_instruments_and_get_a_widget(connected):
     assert f"g.id == {device_id}" in widget.svg_template
 
 
-def test_rangefinder_reading_and_place_are_in_the_instruments(connected):
+def test_rangefinder_reading_and_place_are_in_the_instruments(connected, t0):
     connected._gimbal_rangefinders = {154: 0}
     connected.handle(from_src("gps_global_origin", 446470000, -635800000, 0))
     connected.handle(from_src("local_position_ned", 0, 0, 0, -10, 0, 0, 0))
     robot_attitude(connected)
     connected.handle(gimbal_attitude(Orientation()))
-    connected.tick(100.0)
+    connected.tick(t0)
     assert connected._instruments.gimbals[0]["range"] is None  # none reported
     connected.handle(distance_sensor(1234))
     spot = connected._spots[154]
     assert _wait_for(lambda: spot.pose is not None)
-    connected.tick(101.0)
+    connected.tick(t0 + 1.0)
     reading = connected._instruments.gimbals[0]["range"]
     assert reading == {
         "status": "ok",
