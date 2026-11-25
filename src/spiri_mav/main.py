@@ -39,7 +39,8 @@ class Settings(BaseSettings):
         None  # e.g. tcp/127.0.0.1:7447: join via that router as a client
     )
     # Which SpiriCamera cameras each gimbal carries, by gimbal device id: MAVLink
-    # doesn't say. JSON in the environment, e.g. {"1": ["mu-1/camera_eo"]}.
+    # doesn't say. JSON in the environment, e.g. {"1": ["mu-1/camera_eo"]}; a
+    # leading "./" is this host's base topic, e.g. {"1": ["./cameras/1/raw"]}.
     gimbal_cameras: dict[int, list[str]] = {}
     # Which DISTANCE_SENSOR id is each gimbal's rangefinder, by gimbal device
     # id: ArduPilot reports one as fixed to the airframe. E.g. {"1": 0}.
@@ -84,13 +85,14 @@ def serve(settings: Settings, stop: threading.Event | None = None) -> None:
         config.insert_json5("mode", '"client"')
         config.insert_json5("connect/endpoints", json.dumps([settings.zenoh_connect]))
         current_session.set(Session(config=config))
+    session = current_session.get()
     robot = MavRobot(
         settings.topic,
         synq_authoritive=True,
         sysid=settings.sysid,
         target_sysid=settings.target_sysid,
         _gimbal_cameras={
-            device_id: tuple(Link(topic) for topic in topics)
+            device_id: tuple(Link(session.resolve_topic(t)) for t in topics)
             for device_id, topics in settings.gimbal_cameras.items()
         },
         _gimbal_rangefinders=settings.gimbal_rangefinders,

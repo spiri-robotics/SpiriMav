@@ -11,6 +11,8 @@
   it as the robot's gimbal's rangefinder when it has exactly one gimbal, as the message
   doesn't say which. Its `quaternion` is ignored: the firmware sends the gimbal's own
   attitude, which the gimbal's pose already has.
+- **Relative gimbal cameras**: a `SPIRI_MAV_GIMBAL_CAMERAS` topic may start with `./`, this
+  host's base topic, so one config fits every robot: `{"1": ["./cameras/1/raw"]}`.
 - **Detections (SpiriDetect)**: SpiriMav depends on `spiridetect>=0.1.0` and publishes the
   robot's report of itself at `<host>/detections/self`: a SpiriDetect `Detection` at the
   robot's origin, so its pose is the robot's, with its ground `speed` and `course` (None

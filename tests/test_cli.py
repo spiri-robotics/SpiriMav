@@ -75,3 +75,26 @@ def test_gimbal_cameras_from_environment(monkeypatch) -> None:
 
     monkeypatch.setenv("SPIRI_MAV_GIMBAL_CAMERAS", '{"1": ["mu-1/camera_eo"]}')
     assert Settings().gimbal_cameras == {1: ["mu-1/camera_eo"]}
+
+
+def test_gimbal_cameras_resolve_under_the_base_topic(monkeypatch) -> None:
+    from SpiriSynq.session import current_session
+
+    from spiri_mav.main import Settings, serve
+    from spiri_mav.mav_robot import MavRobot
+
+    seen = {}
+
+    def fake_run(self, url, stop=None):
+        seen.update(self._gimbal_cameras)
+
+    monkeypatch.setattr(MavRobot, "run", fake_run)
+    monkeypatch.setattr(MavRobot, "close", lambda self: None)
+    serve(
+        Settings(
+            topic="test/serve_cams",
+            gimbal_cameras={1: ["./cameras/1/raw", "other/cam"]},
+        )
+    )
+    base = current_session.get().base_topic
+    assert [link.topic for link in seen[1]] == [f"{base}/cameras/1/raw", "other/cam"]
