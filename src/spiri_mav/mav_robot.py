@@ -9,6 +9,11 @@ The robot hangs in the frame tree under the autopilot's EKF origin::
      │          └─▶ <robot>_home    mount = HOME_POSITION (local NED)
      └─▶ <robot>_roi    mount = the last ROI any GCS set and the FCU accepted, in ECEF
 
+Detections (SpiriDetect) hang off the same tree, at the host's
+``detections/``: ``detections/self`` is the robot's report of itself, at its
+origin, and ``detections/rangefinder/gimbal<id>`` what a gimbal's rangefinder
+hits, along the gimbal's axis.
+
 so autopilot telemetry goes into mounts unconverted, and the part of the tree
 below the origin works without GPS. The origin, home and ROI are sibling topics,
 not ``<robot>/origin``: an object's subscriber on ``<robot>/**`` would
@@ -35,6 +40,7 @@ from typing import Any, Literal
 import zenoh
 from loguru import logger
 from pymavlink import mavutil
+from SpiriDetect import Detection, detection_topic, self_topic
 from SpiriSynq.example_types.position import (
     Accuracy,
     Offset,
@@ -46,7 +52,8 @@ from SpiriSynq.example_types.position import (
 from SpiriSynq.link import Link
 from SpiriSynq.remote_callables import RpcException, encode_parameters
 
-from spiri_mav.gimbal import BearingDetection, Gimbal
+from spiri_mav.geoid import geoid_height
+from spiri_mav.gimbal import Gimbal, RangefinderDetection
 from spiri_mav.hud import (
     HudWidget,
     Instruments,
@@ -97,6 +104,34 @@ STREAMS = {
 # DISTANCE_SENSOR, in Hz, when a gimbal has a rangefinder.
 RANGEFINDER_HZ = 10
 RANGEFINDER_TIMEOUT = 2.0  # s without a reading before a gimbal's goes to None
+# The robot's report of itself: how long it holds without a position, and
+# the ground speed below which it has no course.
+SELF_STALE_AFTER = 2.0  # s
+SELF_MIN_SPEED = 0.5  # m/s
+# How often a detection's time, and the report's speed and course, are
+# updated: each is a put of its own, and staleness needs no finer.
+DETECTION_TIME_PERIOD = 1.0  # s
+# Cursor on Target types for the report, by MAV_TYPE: friendly, as it's us.
+_ROTARY = "a-f-A-M-H-Q"
+_FIXED_WING = "a-f-A-M-F-Q"
+_COT_TYPES = {
+    mavlink.MAV_TYPE_QUADROTOR: _ROTARY,
+    mavlink.MAV_TYPE_HEXAROTOR: _ROTARY,
+    mavlink.MAV_TYPE_OCTOROTOR: _ROTARY,
+    mavlink.MAV_TYPE_TRICOPTER: _ROTARY,
+    mavlink.MAV_TYPE_DODECAROTOR: _ROTARY,
+    mavlink.MAV_TYPE_DECAROTOR: _ROTARY,
+    mavlink.MAV_TYPE_HELICOPTER: _ROTARY,
+    mavlink.MAV_TYPE_COAXIAL: _ROTARY,
+    mavlink.MAV_TYPE_FIXED_WING: _FIXED_WING,
+    mavlink.MAV_TYPE_GENERIC_MULTIROTOR: _ROTARY,
+    mavlink.MAV_TYPE_VTOL_DUOROTOR: _FIXED_WING,
+    mavlink.MAV_TYPE_VTOL_QUADROTOR: _FIXED_WING,
+    mavlink.MAV_TYPE_VTOL_TILTROTOR: _FIXED_WING,
+    mavlink.MAV_TYPE_GROUND_ROVER: "a-f-G-E-V",
+    mavlink.MAV_TYPE_SURFACE_BOAT: "a-f-S",
+    mavlink.MAV_TYPE_SUBMARINE: "a-f-U",
+}
 HUD_PERIOD = 0.1  # s between updates of the HUD's instruments
 
 # Cameras' lenses, passed to the SpiriCamera cameras their gimbal carries.
@@ -370,7 +405,7 @@ class MavGimbal(Gimbal):
             int_frame=mavlink.MAV_FRAME_GLOBAL,
             x=round(lat * 1e7),
             y=round(lon * 1e7),
-            z=height - robot._separation(),
+            z=height - robot._separation(lat, lon),
         )
         robot._show_roi(target)
 
@@ -424,6 +459,7 @@ class MavRobot(Robot):
     _origin: Position | None = None
     _home: Position | None = None
     _roi: Position | None = None
+    _self: Detection | None = None  # detections/self
     _gimbals: dict[int, MavGimbal] = field(default_factory=dict)  # by gimbal device id
     _gimbal_cameras: dict[int, tuple[Link, ...]] = field(
         default_factory=dict
@@ -431,9 +467,9 @@ class MavRobot(Robot):
     # Which DISTANCE_SENSOR id each gimbal's rangefinder is, by gimbal device
     # id: config, as ArduPilot reports a rangefinder as fixed to the airframe.
     _gimbal_rangefinders: dict[int, int] = field(default_factory=dict)
-    # By gimbal device id: each rangefinder's spot, from its first report,
-    # and when it last read.
-    _spots: dict[int, BearingDetection] = field(default_factory=dict)
+    # By gimbal device id: each rangefinder's detection, from its first
+    # report, and when it last read.
+    _spots: dict[int, RangefinderDetection] = field(default_factory=dict)
     _last_range: dict[int, float] = field(default_factory=dict)
     # Config, as MAVLink doesn't report them; None leaves them unknown. ± deg
     # off a gimbal's axis, and ± (m, m per m of distance) for a rangefinder.
@@ -488,6 +524,14 @@ class MavRobot(Robot):
             relative_to=RootFrame("ECEF"),
         )
         self.relative_to = Link.to(self._origin)
+        self._self = Detection(
+            self_topic(),
+            synq_authoritive=True,
+            relative_to=Link.to(self),
+            mount=Pose(),
+            label=self.synq_base_topic,
+            stale_after=SELF_STALE_AFTER,
+        )
         self._instruments = Instruments(
             f"{self.synq_topic}_instruments", synq_authoritive=True
         )
@@ -503,6 +547,7 @@ class MavRobot(Robot):
             self._instruments,
             *self._spots.values(),
             *self._gimbals.values(),
+            self._self,
             self._home,
             self._roi,
             self._origin,
@@ -645,17 +690,17 @@ class MavRobot(Robot):
                 status, distance = "ok", msg.current_distance / 100
             if distance is not None and self._range_accuracy is not None:
                 fixed, per_m = self._range_accuracy
-                spot.range_accuracy = fixed + per_m * distance
+                # To a decimetre, so it's sent only when it changes by that.
+                spot.range_accuracy = round(fixed + per_m * distance, 1)
             spot.set_reading(
                 status,
                 distance,
                 msg.min_distance / 100,
                 msg.max_distance / 100,
-                elevation=self._gimbals[device_id].pitch,
             )
             self._last_range[device_id] = time.monotonic()
 
-    def _add_rangefinder(self, device_id: int) -> BearingDetection | None:
+    def _add_rangefinder(self, device_id: int) -> RangefinderDetection | None:
         """Gimbal *device_id*'s rangefinder, now that its sensor has reported.
 
         Config says which sensor is whose, but only a report says there is
@@ -664,12 +709,12 @@ class MavRobot(Robot):
         if not self.synq_authoritive:
             return None
         gimbal = self._gimbals[device_id]
-        # A sibling topic, not nested, as the gimbal is the robot's.
-        spot = BearingDetection(
-            f"{gimbal.synq_topic}_range",
+        spot = RangefinderDetection(
+            detection_topic("rangefinder", f"gimbal{device_id}"),
             synq_authoritive=True,
             relative_to=Link.to(gimbal),
-            pointing_accuracy=self._pointing_accuracy,
+            bearing_accuracy=self._pointing_accuracy,
+            stale_after=RANGEFINDER_TIMEOUT,
         )
         self._spots[device_id] = spot
         gimbal.rangefinder = Link.to(spot)
@@ -733,6 +778,8 @@ class MavRobot(Robot):
         if msg.type != self._mav_type:
             self._mav_type = msg.type
             self.vehicle_type = _enum_name("MAV_TYPE", msg.type, "MAV_TYPE_")
+            if self._self is not None:
+                self._self.cot_type = _COT_TYPES.get(msg.type)
             self.available_modes = self._modes()
         self.armed = bool(msg.base_mode & mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
         self.mode = mavutil.mode_string_v10(msg)
@@ -772,6 +819,18 @@ class MavRobot(Robot):
         self._local = Offset(msg.x, msg.y, msg.z)
         self.velocity = Velocity(msg.vx, msg.vy, msg.vz)
         self._update_mount()
+        now = time.time()
+        if self._self is not None and (
+            self._self.time is None or now - self._self.time >= DETECTION_TIME_PERIOD
+        ):
+            speed = math.hypot(msg.vx, msg.vy)
+            self._self.speed = speed
+            self._self.course = (
+                math.degrees(math.atan2(msg.vy, msg.vx)) % 360
+                if speed >= SELF_MIN_SPEED
+                else None
+            )
+            self._self.time = now
 
     def _on_attitude_quaternion(self, msg) -> None:
         # Body (FRD) to local NED -- the tree's convention as it stands.
@@ -822,15 +881,20 @@ class MavRobot(Robot):
             return
         lat, lon, amsl = self._origin_geo
         self._origin.mount = Pose(
-            Offset.from_geodetic(lat, lon, amsl + self._separation()),
+            Offset.from_geodetic(lat, lon, amsl + self._separation(lat, lon)),
             Orientation.ned_to_ecef(lat, lon),
         )
 
-    def _separation(self) -> float:
-        # Without it, MSL heights stand in for ellipsoid heights. Targets taken
-        # from this robot's own tree still round-trip exactly; targets from
-        # elsewhere are off vertically by the local geoid separation.
-        return self._geoid_separation if self._geoid_separation is not None else 0.0
+    def _separation(self, lat: float, lon: float) -> float:
+        """Ellipsoid minus MSL at *lat*/*lon*: the GPS's, else EGM96's.
+
+        A GPS that reports ``alt_ellipsoid`` knows it best; one that doesn't
+        (ArduPilot SITL) gets the model's, so every height in the tree is above
+        the ellipsoid either way and agrees with other sources (ATAK's ``hae``).
+        """
+        if self._geoid_separation is not None:
+            return self._geoid_separation
+        return geoid_height(lat, lon)
 
     def _on_home_position(self, msg) -> None:
         self._home_amsl = msg.altitude / 1000
@@ -930,7 +994,7 @@ class MavRobot(Robot):
             amsl = self._home_amsl + alt
         else:
             return _UNPLACEABLE  # above terrain, or home unknown yet
-        return Offset.from_geodetic(lat, lon, amsl + self._separation())
+        return Offset.from_geodetic(lat, lon, amsl + self._separation(lat, lon))
 
     # ── Outgoing messages ─────────────────────────────────────────────────────
 
@@ -1152,7 +1216,7 @@ class MavRobot(Robot):
             int_frame=mavlink.MAV_FRAME_GLOBAL,
             x=round(lat * 1e7),
             y=round(lon * 1e7),
-            z=height - self._separation(),
+            z=height - self._separation(lat, lon),
         )
 
     def _do_land(self) -> None:
@@ -1175,7 +1239,7 @@ class MavRobot(Robot):
                 int_frame=mavlink.MAV_FRAME_GLOBAL,
                 x=round(lat * 1e7),
                 y=round(lon * 1e7),
-                z=height - self._separation(),
+                z=height - self._separation(lat, lon),
             )
         self._show_roi(target)
 

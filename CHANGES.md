@@ -4,6 +4,14 @@
 
 ### Features
 
+- **Detections (SpiriDetect)**: SpiriMav depends on `spiridetect>=0.1.0` and publishes the
+  robot's report of itself at `<host>/detections/self`: a SpiriDetect `Detection` at the
+  robot's origin, so its pose is the robot's, with its ground `speed` and `course` (None
+  below 0.5 m/s) from `LOCAL_POSITION_NED`, the observation `time`, `stale_after` 2 s
+  (time, speed and course are updated once a second, each being a put of its own),
+  the host as `label`, and a Cursor on Target `cot_type` from the heartbeat's `MAV_TYPE`
+  (`a-f-A-M-H-Q` for rotorcraft, `a-f-A-M-F-Q` for fixed wing and VTOL, None when
+  unknown).
 - **HUD widgets**: SpiriMav publishes the robot's overlays for its cameras, as SpiriCamera
   `HudWidget`s a camera shows by naming them in its `overlay_widgets`. The generic ones,
   any camera's to show, are under `hud/widgets/`: a virtual horizon (`horizon`, an
@@ -35,13 +43,15 @@
   the `mavlink` origin: when they change, and every 10 s for a camera that restarted.
   `CAMERA_INFORMATION.gimbal_device_id` says which gimbal a camera is on; one on no
   gimbal, or on one with no cameras configured, is left alone.
-- **Gimbal rangefinders**: where a gimbal's rangefinder hits is a `BearingDetection`, a
-  Position at `<robot>_gimbal<id>_range` under the gimbal (`Gimbal.rangefinder` links to
-  it): a point at the reading's distance along the gimbal's x axis, so its pose has
-  coordinates like any frame. It also carries the reading, `status` (`ok`, `near`,
-  `far`), `distance`, the sensor's `min` and `max`, and the beam's accuracies. With no
-  return it has no mount or pose, and after 2 s without a reading its status goes to
-  `None`. Readings come from `DISTANCE_SENSOR` (streamed at 10 Hz), since ArduPilot
+- **Gimbal rangefinders**: what a gimbal's rangefinder hits is a `RangefinderDetection`,
+  SpiriDetect's `BearingDetection` along the gimbal's x axis, at
+  `<host>/detections/rangefinder/gimbal<id>` (`Gimbal.rangefinder` links to it). With a
+  return, `range` is the reading and its pose is the spot, with coordinates like any
+  frame. It also carries `status` (`ok`, `near`, `far`), the sensor's `min` and `max`, the
+  beam's accuracies (`range_accuracy` to 0.1 m, so it's sent only when it changes by
+  that), the reading's `time` (to within a second), and `stale_after` 2 s. Too near or too far, it
+  is a bearing without a range: a `ray`, no pose. After 2 s without a reading its status
+  goes to `None` and it's cleared. Readings come from `DISTANCE_SENSOR` (streamed at 10 Hz), since ArduPilot
   reports a rangefinder only as fixed to the airframe; which sensor id is which gimbal's
   is config, `SPIRI_MAV_GIMBAL_RANGEFINDERS`, e.g. `{"1": 0}`. Config only says whose a
   sensor would be: the spot is created when that sensor first reports, so a robot without
@@ -49,20 +59,30 @@
 - **Configured accuracies**: neither autopilot reports how accurately a gimbal knows where
   it points or how accurate a rangefinder is, so they're config, as 90% bounds:
   `SPIRI_MAV_GIMBAL_POINTING_ACCURACY` (± degrees off the axis, default 1.0, mostly the
-  vehicle's compass heading), published as `Gimbal.pointing_accuracy` and the spot's
-  `pointing_accuracy`; and `SPIRI_MAV_RANGEFINDER_ACCURACY` plus
+  vehicle's compass heading), published as `Gimbal.pointing_accuracy` and the detection's
+  `bearing_accuracy`; and `SPIRI_MAV_RANGEFINDER_ACCURACY` plus
   `SPIRI_MAV_RANGEFINDER_ACCURACY_PER_M` (± metres along the beam, default 1.0 m + 0.25% of
-  the distance, a ZT30-class laser's spec), as the spot's `range_accuracy`. The defaults
-  are estimates; set a datasheet's figures. The spot's mount carries the beam's error as
-  an `Accuracy`, horizontal and vertical by the beam's elevation, so its pose accuracy is
-  the whole tree's.
+  the distance, a ZT30-class laser's spec), as the detection's `range_accuracy`. The defaults
+  are estimates; set a datasheet's figures. SpiriDetect adds the beam's error to the
+  gimbal's pose accuracy, horizontal and vertical by the beam's elevation, so the spot's
+  pose accuracy is the whole tree's.
 
 ### Fixes
+
+- Heights are above the WGS84 ellipsoid even when the GPS doesn't report its geoid separation
+  (`GPS_RAW_INT.alt_ellipsoid`; ArduPilot SITL doesn't): the separation then comes from EGM96, a
+  15' grid shipped in the package (`spiri_mav.geoid`), rather than being taken as 0. Before, SITL
+  robots' heights were sea-level heights posing as ellipsoid heights, ~21 m off against anything
+  real (an ATAK phone's `hae`). Goto, ROI and other GCSes' targets convert with the same value.
 
 - **SpiriSynq from PyPI**, `>=0.6.0`, instead of a `../SpiriSynq` checkout, which broke CI
   and the Docker image build.
 
 ### Tests
+
+- `detections/self`: where it is, its type by vehicle, speed and course, and that it
+  reaches mirrors. The rangefinder tests follow it to SpiriDetect's fields and topic;
+  `beam_accuracy`'s test went with it to SpiriDetect.
 
 - Every HUD widget is rendered as a camera renders it (MiniJinja, strict about undefined
   values) against flying, unknown and failing states; `minijinja` is a dev dependency.

@@ -10,57 +10,55 @@ The gimbal owns its cameras: ``cameras`` links to the SpiriCamera objects it
 carries. The motion lives here; a camera is the sensor it points.
 
 A rangefinder on the gimbal, along the cameras' axis, is the gimbal's too.
-What it hits is a :class:`BearingDetection`, a point in the frame tree under
-the gimbal, linked from ``rangefinder``.
+What it hits is a :class:`RangefinderDetection`, SpiriDetect's
+``BearingDetection`` along the gimbal's axis, linked from ``rangefinder``.
 
 Neither autopilot reports how accurately a gimbal knows where it points or
-how accurate a rangefinder is, so ``pointing_accuracy`` and the spot's beam
-accuracies are configured: a datasheet's figures, or the defaults, which are
-estimates (see ``spiri_mav.main.Settings``).
+how accurate a rangefinder is, so ``pointing_accuracy`` and the detection's
+beam accuracies are configured: a datasheet's figures, or the defaults, which
+are estimates (see ``spiri_mav.main.Settings``).
 """
 
 from __future__ import annotations
 
-import math
+import time
 from dataclasses import dataclass
 from typing import Literal
 
-from SpiriSynq.example_types.position import Accuracy, Offset, Pose, Position
+from SpiriDetect import BearingDetection
+from SpiriSynq.example_types.position import Offset, Position
 from SpiriSynq.link import Link
 from SpiriSynq.remote_callables import remote_method
 
 from spiri_mav.robot import CommandRefused
+
+# How often a rangefinder's detection's ``time`` is updated: a put of its
+# own, and staleness needs no finer.
+TIME_PERIOD = 1.0  # s
 
 # "near": something closer than ``min``; "far": nothing within ``max``.
 RangeStatus = Literal["ok", "near", "far"]
 
 
 @dataclass
-class BearingDetection(Position):
-    """Where a gimbal's rangefinder hits: a point in the frame tree.
+class RangefinderDetection(BearingDetection):
+    """What a gimbal's rangefinder hits: a bearing along the gimbal's axis.
 
-    A sample of SpiriDetect's first detection kind, a bearing from a sensor
-    frame with an optional range, kept here until SpiriDetect exists; see
-    ``NOTES-bearing-detection.md`` for what the real one needs that this
-    doesn't have.
+    ``relative_to`` links to the gimbal, and the bearing is straight down its
+    x axis, the way it points. With a return, ``range`` is the reading and
+    ``pose`` the spot, its accuracy the whole tree's: the beam's
+    (``range_accuracy`` along it, ``bearing_accuracy`` across it, the gimbal's
+    pointing accuracy), the gimbal's and the robot's above it. Something too
+    near or nothing within reach is a bearing without a range: the ``ray``,
+    no ``pose``. A silent rangefinder has neither.
 
-    ``relative_to`` links to the gimbal, and ``mount`` is a point at
-    ``(distance, 0, 0)`` along the gimbal's x axis, the way it points. The
-    mount's accuracy is the beam's own error, from ``range_accuracy`` along it
-    and ``pointing_accuracy`` across it, as 90% bounds level and plumb, so the
-    spot's ``pose.accuracy`` is the whole tree's: the beam's, the gimbal's and
-    the robot's above it. With no return there's no spot: ``mount`` and
-    ``pose`` are None, and ``status`` says why.
-
-    The rest is the reading, and the beam it was taken along.
+    ``status`` says which, and ``min``/``max`` are what the sensor can measure.
+    ``time`` is the latest reading's to within ``TIME_PERIOD``.
     """
 
     status: RangeStatus | None = None  # None while the rangefinder is silent
-    distance: float | None = None  # m along the beam; only when status is "ok"
     min: float | None = None  # m: what the rangefinder can measure
     max: float | None = None  # m
-    range_accuracy: float | None = None  # ± m along the beam, 90%; configured
-    pointing_accuracy: float | None = None  # ± deg off the beam, 90%; the gimbal's
 
     def set_reading(
         self,
@@ -68,47 +66,16 @@ class BearingDetection(Position):
         distance: float | None = None,
         min: float | None = None,
         max: float | None = None,
-        elevation: float | None = None,
     ) -> None:
-        """Take a reading along a beam *elevation* degrees above the horizon."""
-        self.status, self.distance, self.min, self.max = status, distance, min, max
-        if status != "ok" or distance is None:
-            self.mount = None
+        """Take a reading: *distance* m along the gimbal's axis when *status* is "ok"."""
+        self.status, self.min, self.max = status, min, max
+        if status is None:
+            self.clear()
             return
-        self.mount = Pose(
-            offset=Offset(x=distance),
-            orientation=None,
-            accuracy=beam_accuracy(
-                distance, elevation, self.range_accuracy, self.pointing_accuracy
-            ),
-        )
-
-
-def beam_accuracy(
-    distance: float,
-    elevation: float | None,
-    along: float | None,
-    pointing: float | None,
-) -> Accuracy | None:
-    """The 90% bounds of a spot at *distance* along a beam, level and plumb.
-
-    *along* is the error along the beam (m) and *pointing* the error off it
-    (deg), which puts the spot ``distance * tan(pointing)`` off sideways. Each
-    is split between horizontal and vertical by the beam's *elevation* (deg
-    above the horizon; level if unknown) and summed in quadrature, as
-    ``Accuracy`` sums independent errors. A sideways error is horizontal one
-    way and partly vertical the other, so horizontal takes all of it. Unknown
-    errors are left out; with neither known, so is the accuracy.
-    """
-    if along is None and pointing is None:
-        return None
-    e = math.radians(elevation or 0.0)
-    a = along or 0.0
-    side = distance * math.tan(math.radians(pointing or 0.0))
-    return Accuracy(
-        horizontal=math.hypot(a * math.cos(e), side),
-        vertical=math.hypot(a * math.sin(e), side * math.cos(e)),
-    )
+        now = time.time()
+        if self.time is None or now - self.time >= TIME_PERIOD:
+            self.time = now
+        self.set_bearing(0.0, 0.0, distance if status == "ok" else None)
 
 
 @dataclass
@@ -126,7 +93,9 @@ class Gimbal(Position):
     pitch_range: tuple[float, float] | None = None  # deg
     yaw_range: tuple[float, float] | None = None  # deg, robot-relative
     cameras: tuple[Link, ...] = ()  # SpiriCamera cameras this gimbal carries
-    rangefinder: Link | None = None  # its BearingDetection; None without a rangefinder
+    rangefinder: Link | None = (
+        None  # its RangefinderDetection; None without a rangefinder
+    )
     pointing_accuracy: float | None = None  # ± deg, 90%, off its x axis; configured
 
     @remote_method()

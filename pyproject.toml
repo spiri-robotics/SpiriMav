@@ -10,6 +10,7 @@ dependencies = [
     "loguru>=0.7.3",
     "pydantic-settings>=2.14.2",
     "pymavlink>=2.4.50",
+    "spiridetect>=0.1.0",
     "spirisynq>=0.6.0",
     "typer>=0.26.8",
 ]

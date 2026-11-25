@@ -45,7 +45,7 @@ from string import Template
 from SpiriSynq.example_types.position import Pose, Position
 from SpiriSynq.syncable_objects import SyncableObject
 
-from spiri_mav.gimbal import BearingDetection, Gimbal
+from spiri_mav.gimbal import Gimbal, RangefinderDetection
 from spiri_mav.robot import Robot
 
 FONT = "Miracode"
@@ -91,15 +91,15 @@ class Instruments(SyncableObject):
     batteries: tuple[dict, ...] = ()
     # {"id", "pitch", "yaw", "yaw_lock", "range"} each, by id; as Gimbal's.
     # "range" is None without a rangefinder, else {"status", "distance",
-    # "min", "max", "accuracy", "place"}: BearingDetection's, with
-    # range_accuracy as accuracy, and place, where the spot is.
+    # "min", "max", "accuracy", "place"}: RangefinderDetection's, with
+    # range as distance, range_accuracy as accuracy, and place, where the spot is.
     gimbals: tuple[dict, ...] = ()
 
     def update(
         self,
         robot: Robot,
         home: Pose | None,
-        gimbals: Iterable[tuple[int, Gimbal, BearingDetection | None]],
+        gimbals: Iterable[tuple[int, Gimbal, RangefinderDetection | None]],
     ) -> None:
         """Follow *robot*, whose mount is in local NED, as is *home*'s.
 
@@ -165,10 +165,10 @@ def _round(value: float) -> float:
     return round(value, 1) + 0.0
 
 
-def _reading(spot: BearingDetection) -> dict:
+def _reading(spot: RangefinderDetection) -> dict:
     return {
         "status": spot.status,
-        "distance": None if spot.distance is None else _round(spot.distance),
+        "distance": None if spot.range is None else _round(spot.range),
         "min": spot.min,
         "max": spot.max,
         "accuracy": None

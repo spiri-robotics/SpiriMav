@@ -9,12 +9,14 @@ import time
 
 import pytest
 from pymavlink import mavutil
-from SpiriSynq.example_types.position import Offset, Orientation
+from SpiriDetect import Detection, beam_accuracy
+from SpiriSynq.example_types.position import Offset, Orientation, Pose
 from SpiriSynq.link import Link
 from SpiriSynq.remote_callables import decode_parameters
 
 from spiri_mav import mav_robot
-from spiri_mav.gimbal import BearingDetection, Gimbal, beam_accuracy
+from spiri_mav.geoid import geoid_height
+from spiri_mav.gimbal import Gimbal, RangefinderDetection
 from spiri_mav.mav_robot import MavRobot, classify_failsafe_text
 from spiri_mav.robot import Battery, CommandRefused, GpsFix, Robot, Velocity
 
@@ -334,6 +336,79 @@ def test_origin_places_robot_on_the_globe(connected):
     assert connected.mount.accuracy.horizontal == pytest.approx(1.5 * 2.146, rel=1e-3)
 
 
+def test_without_a_gps_separation_the_origin_uses_egm96(connected):
+    """SITL reports no alt_ellipsoid: the origin is still an ellipsoid height."""
+    lat, lon, amsl = 43.83, -66.09, 43.0  # the Yarmouth world's origin
+    connected.handle(
+        from_src(
+            "gps_global_origin", round(lat * 1e7), round(lon * 1e7), round(amsl * 1000)
+        )
+    )
+    connected.handle(from_src("local_position_ned", 0, 0.0, 0.0, 0.0, 0, 0, 0))
+    assert _wait_for(lambda: connected.pose is not None)
+    height = connected.pose.offset.to_geodetic()[2]
+    assert height == pytest.approx(amsl + geoid_height(lat, lon), abs=0.01)
+    assert -25 < height - amsl < -18  # the geoid is ~21 m below the ellipsoid there
+
+
+def test_self_detection_is_the_robot(connected):
+    me = connected._self
+    assert me.synq_absolute_path == f"{connected.synq_base_topic}/detections/self"
+    assert me.relative_to == Link.to(connected)
+    assert me.mount == Pose()
+    assert me.label == connected.synq_base_topic
+    assert me.cot_type == "a-f-A-M-H-Q"  # a quadrotor's heartbeat
+    assert me.stale_after == mav_robot.SELF_STALE_AFTER
+
+    connected.handle(from_src("gps_global_origin", 450000000, -750000000, 0))
+    connected.handle(from_src("local_position_ned", 0, 0, 0, -10, 0, -3.0, 0))  # west
+    assert me.speed == pytest.approx(3.0)
+    assert me.course == pytest.approx(270.0)
+    assert me.time == pytest.approx(time.time(), abs=5)
+    # Where the robot is, as the robot.
+    assert _wait_for(lambda: me.pose is not None and connected.pose is not None)
+    assert me.pose.offset == connected.pose.offset
+
+
+def test_self_detection_has_no_course_when_hovering(connected):
+    connected.handle(from_src("local_position_ned", 0, 0, 0, -10, 0.1, 0.1, 0))
+    assert connected._self.course is None
+    assert connected._self.speed == pytest.approx(math.hypot(0.1, 0.1))
+
+
+def test_self_detection_updates_once_a_second(connected, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(mav_robot.time, "time", lambda: clock[0])
+    connected.handle(from_src("local_position_ned", 0, 0, 0, -10, 3.0, 0, 0))
+    me = connected._self
+    assert (me.time, me.speed) == (1000.0, pytest.approx(3.0))
+    clock[0] += 0.5
+    connected.handle(from_src("local_position_ned", 0, 0, 0, -10, 5.0, 0, 0))
+    assert (me.time, me.speed) == (1000.0, pytest.approx(3.0))  # held
+    clock[0] += 0.5
+    connected.handle(from_src("local_position_ned", 0, 0, 0, -10, 5.0, 0, 0))
+    assert (me.time, me.speed) == (1001.0, pytest.approx(5.0))
+
+
+@pytest.mark.parametrize(
+    "mav_type, cot_type",
+    [
+        (mavlink.MAV_TYPE_FIXED_WING, "a-f-A-M-F-Q"),
+        (mavlink.MAV_TYPE_GROUND_ROVER, "a-f-G-E-V"),
+        (mavlink.MAV_TYPE_GENERIC, None),
+    ],
+)
+def test_self_detection_type_follows_the_vehicle(robot, mav_type, cot_type):
+    robot.handle(heartbeat(mav_type=mav_type))
+    assert robot._self.cot_type == cot_type
+
+
+def test_self_detection_reaches_mirrors(connected):
+    connected.handle(from_src("local_position_ned", 0, 0, 0, -10, 3.0, 0, 0))
+    mirror = Detection.from_topic(connected._self.synq_absolute_path)
+    assert (mirror.cot_type, mirror.course) == ("a-f-A-M-H-Q", 0.0)
+
+
 def test_home_is_a_linked_position(connected):
     connected.handle(from_src("gps_global_origin", 450000000, -750000000, 0))
     connected.handle(
@@ -579,7 +654,11 @@ def test_another_gcs_roi_long_is_above_home_on_ardupilot(connected):
         )
     )
     connected.handle(ack_to_qgc(mavlink.MAV_CMD_DO_SET_ROI_LOCATION))
-    assert connected._roi.mount.offset.to_geodetic()[2] == pytest.approx(70.0, abs=1e-6)
+    # No separation from the GPS: EGM96's, so the height is above the ellipsoid.
+    expected = 70.0 + geoid_height(45.0, -75.0)
+    assert connected._roi.mount.offset.to_geodetic()[2] == pytest.approx(
+        expected, abs=1e-6
+    )
 
 
 def test_another_gcs_unplaceable_roi_hides_ours(connected):
@@ -878,7 +957,10 @@ def test_rangefinder_appears_when_its_sensor_reports(ranged):
     assert ranged._spots == {} and gimbal.rangefinder is None
     ranged.handle(distance_sensor(1234))
     spot = ranged._spots[154]
-    assert spot.synq_topic == "test/robot_rng_gimbal154_range"
+    assert (
+        spot.synq_absolute_path
+        == f"{ranged.synq_base_topic}/detections/rangefinder/gimbal154"
+    )
     assert spot.relative_to == Link.to(gimbal)
     assert gimbal.rangefinder == Link.to(spot)
     assert ranged._hud[-1].synq_topic == "test/robot_rng_gimbal154_range_hud"
@@ -892,17 +974,18 @@ def test_rangefinder_waits_for_its_gimbal(robot):
     robot_attitude(robot)
     robot.handle(gimbal_attitude(Orientation()))
     robot.handle(distance_sensor(1234))
-    assert robot._spots[154].distance == 12.34
+    assert robot._spots[154].range == 12.34
 
 
 def test_rangefinder_reading_places_the_spot(ranged):
     ranged.handle(distance_sensor(1234))
     ranged.handle(distance_sensor(500, sensor_id=1))  # someone else's
     spot = ranged._spots[154]
-    assert (spot.status, spot.distance, spot.min, spot.max) == ("ok", 12.34, 0.2, 650.0)
-    # A point along the gimbal's x axis.
+    assert (spot.status, spot.range, spot.min, spot.max) == ("ok", 12.34, 0.2, 650.0)
+    assert spot.time is not None and spot.stale_after == mav_robot.RANGEFINDER_TIMEOUT
+    # Straight along the gimbal's x axis.
+    assert (spot.azimuth, spot.elevation) == (0.0, 0.0)
     assert spot.mount.offset == Offset(x=12.34)
-    assert spot.mount.orientation is None
 
 
 @pytest.mark.parametrize(
@@ -913,15 +996,32 @@ def test_rangefinder_out_of_range(ranged, current, status):
     ranged.handle(distance_sensor(current))
     spot = ranged._spots[154]
     assert spot.status == status
-    # No return, no spot.
-    assert (spot.mount is None) == (status != "ok")
+    # No return, no range: a bearing alone.
+    assert (spot.range is None) == (status != "ok")
+    assert spot.mount is not None
+
+
+def test_rangefinder_time_updates_once_a_second(ranged, monkeypatch):
+    from spiri_mav import gimbal as gimbal_module
+
+    clock = [1000.0]
+    monkeypatch.setattr(gimbal_module.time, "time", lambda: clock[0])
+    ranged.handle(distance_sensor(1234))
+    spot = ranged._spots[154]
+    assert spot.time == 1000.0
+    clock[0] += 0.5
+    ranged.handle(distance_sensor(1300))
+    assert (spot.time, spot.range) == (1000.0, 13.0)  # the reading, not its time
+    clock[0] += 0.5
+    ranged.handle(distance_sensor(1300))
+    assert spot.time == 1001.0
 
 
 def test_rangefinder_goes_silent(ranged):
     ranged.handle(distance_sensor(1234))
     ranged.tick(time.monotonic() + mav_robot.RANGEFINDER_TIMEOUT + 1)
     spot = ranged._spots[154]
-    assert spot.status is None and spot.mount is None
+    assert spot.status is None and spot.mount is None and spot.range is None
 
 
 def test_rangefinder_is_streamed_only_when_configured(robot, ranged):
@@ -939,8 +1039,8 @@ def test_rangefinder_is_streamed_only_when_configured(robot, ranged):
 
 def test_rangefinder_spot_reaches_mirrors(ranged):
     ranged.handle(distance_sensor(1234))
-    mirror = BearingDetection.from_topic(ranged._spots[154].synq_absolute_path)
-    assert (mirror.status, mirror.distance) == ("ok", 12.34)
+    mirror = RangefinderDetection.from_topic(ranged._spots[154].synq_absolute_path)
+    assert (mirror.status, mirror.range) == ("ok", 12.34)
     assert mirror.mount.offset == Offset(x=12.34)
 
 
@@ -961,28 +1061,20 @@ def test_configured_accuracies_place_the_spot_in_the_tree():
         robot.handle(gimbal_attitude(Orientation()))  # level
         robot.handle(distance_sensor(40000))
         gimbal, spot = robot._gimbals[154], robot._spots[154]
-        assert gimbal.pointing_accuracy == spot.pointing_accuracy == 1.0
+        assert gimbal.pointing_accuracy == spot.bearing_accuracy == 1.0
         assert spot.range_accuracy == pytest.approx(2.0)  # 1 m + 0.25% of 400 m
-        assert spot.mount.accuracy == beam_accuracy(400, 0, 2.0, 1.0)
         # The spot's pose is in the tree, 400 m ahead of the gimbal.
         assert _wait_for(lambda: spot.pose is not None and gimbal.pose is not None)
         ahead = spot.pose.offset - gimbal.pose.offset
         assert math.hypot(ahead.x, ahead.y, ahead.z) == pytest.approx(400, abs=0.01)
-        assert spot.pose.accuracy is not None
+        # Without GPS the robot's own is unknown, so it's the level beam's.
+        expected = beam_accuracy(400, 0, 2.0, 1.0)
+        assert spot.pose.accuracy.horizontal == pytest.approx(
+            expected.horizontal, rel=1e-3
+        )
+        assert spot.pose.accuracy.vertical == pytest.approx(expected.vertical, rel=1e-3)
     finally:
         robot.close()
-
-
-def test_beam_accuracy():
-    side = 100 * math.tan(math.radians(1))  # 1° off at 100 m
-    level = beam_accuracy(100, 0, 1.0, 1.0)
-    assert level.horizontal == pytest.approx(math.hypot(1.0, side))
-    assert level.vertical == pytest.approx(side)
-    down = beam_accuracy(100, -90, 1.0, 1.0)  # straight down: the range error is height
-    assert down.horizontal == pytest.approx(side)
-    assert down.vertical == pytest.approx(1.0)
-    assert beam_accuracy(100, 0, None, None) is None
-    assert beam_accuracy(100, None, 1.0, None).horizontal == pytest.approx(1.0)
 
 
 # ── Camera lenses ────────────────────────────────────────────────────────────

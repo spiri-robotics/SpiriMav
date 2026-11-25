@@ -1305,6 +1305,18 @@ wheels = [
 ]
 
 [[package]]
+name = "spiridetect"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "spirisynq" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/de/a7/3e95c68b493168e40c7af6d31dcd66664899a91929d3d627ae5c28dc2789/spiridetect-0.1.0.tar.gz", hash = "sha256:1175bb59253c395d7121821a47b2155451acd214d5b2c546bcca0cda1fd70fd4", size = 91550, upload-time = "2026-11-12T16:19:34.959Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7e/de/2971e14f1bc163bd18b5a6aa77bd7df64d37094a126cf51b37d5344c1924/spiridetect-0.1.0-py3-none-any.whl", hash = "sha256:a2964c9d99a6ed9a21765c9fa53498e29e7a2dc657623369b2d2ca888b3a4da5", size = 7662, upload-time = "2026-11-12T16:19:33.663Z" },
+]
+
+[[package]]
 name = "spirimav"
 version = "0.1.0"
 source = { editable = "." }
@@ -1312,6 +1324,7 @@ dependencies = [
     { name = "loguru" },
     { name = "pydantic-settings" },
     { name = "pymavlink" },
+    { name = "spiridetect" },
     { name = "spirisynq" },
     { name = "typer" },
 ]
@@ -1340,6 +1353,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "pymavlink", specifier = ">=2.4.50" },
     { name = "sphinx", marker = "extra == 'docs'", specifier = ">=9.1.0" },
+    { name = "spiridetect", specifier = ">=0.1.0" },
     { name = "spirisynq", specifier = ">=0.6.0" },
     { name = "typer", specifier = ">=0.26.8" },
 ]
