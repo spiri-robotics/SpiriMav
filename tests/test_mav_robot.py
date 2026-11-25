@@ -1037,6 +1037,76 @@ def test_rangefinder_is_streamed_only_when_configured(robot, ranged):
     assert mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR in streamed(ranged)
 
 
+def test_rangefinder_mount_message_is_streamed_unconfigured(robot):
+    robot.handle(heartbeat())
+    assert any(
+        m.command == mavlink.MAV_CMD_SET_MESSAGE_INTERVAL
+        and int(m.param1) == mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR_MOUNT
+        for m in robot._conn.of_type("COMMAND_LONG")
+    )
+
+
+# ── DISTANCE_SENSOR_MOUNT: Spiri's firmware's gimbal rangefinder ─────────────
+
+
+def distance_sensor_mount(current, sensor_id=30, min_cm=500, max_cm=120000):
+    msg = mavlink.MAVLink_distance_sensor_mount_message(
+        0,
+        min_cm,
+        max_cm,
+        current,
+        mavlink.MAV_DISTANCE_SENSOR_LASER,
+        sensor_id,
+        mavlink.MAV_SENSOR_ROTATION_CUSTOM,
+        0,
+        quaternion=(1, 0, 0, 0),
+    )
+    sender = mavlink.MAVLink(None, srcSystem=FCU[0], srcComponent=FCU[1])
+    return mavlink.MAVLink(None).decode(bytearray(msg.pack(sender)))
+
+
+def test_mount_message_decodes_as_the_firmware_sends_it():
+    # Captured from a Mu's flight controller: a gimbal laser with no return.
+    frame = bytes.fromhex(
+        "fd2c0000f00101b03600928c4a00f4010000c0d4010000000000001e64"
+        "0000000000000000003ef07a3fb30d873b8434a8bc197b493e384f"
+    )
+    msg = mavlink.MAVLink(None).decode(bytearray(frame))
+    assert msg.get_type() == "DISTANCE_SENSOR_MOUNT"
+    assert (msg.min_distance, msg.max_distance, msg.current_distance) == (
+        500,
+        120000,
+        0,
+    )
+    assert (msg.id, msg.orientation, msg.covariance) == (
+        30,
+        mavlink.MAV_SENSOR_ROTATION_CUSTOM,
+        0,
+    )
+    assert msg.quaternion[0] == pytest.approx(0.9802, abs=1e-4)
+
+
+def test_mount_rangefinder_is_the_only_gimbals(connected):
+    robot_attitude(connected)
+    connected.handle(gimbal_attitude(Orientation()))
+    connected.handle(distance_sensor_mount(80000))  # past DISTANCE_SENSOR's 655 m
+    gimbal, spot = connected._gimbals[154], connected._spots[154]
+    assert gimbal.rangefinder == Link.to(spot)
+    assert (spot.status, spot.range, spot.min, spot.max) == ("ok", 800.0, 5.0, 1200.0)
+    assert spot.mount.offset == Offset(x=800.0)
+    connected.handle(distance_sensor_mount(0))  # no return
+    assert (spot.status, spot.range) == ("near", None)
+
+
+def test_mount_rangefinder_needs_one_gimbal(connected):
+    connected.handle(distance_sensor_mount(1234))  # no gimbal yet
+    robot_attitude(connected)
+    connected.handle(gimbal_attitude(Orientation()))
+    connected.handle(gimbal_attitude(Orientation(), device_id=2))
+    connected.handle(distance_sensor_mount(1234))  # whose?
+    assert connected._spots == {}
+
+
 def test_rangefinder_spot_reaches_mirrors(ranged):
     ranged.handle(distance_sensor(1234))
     mirror = RangefinderDetection.from_topic(ranged._spots[154].synq_absolute_path)

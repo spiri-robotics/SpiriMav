@@ -30,7 +30,6 @@ sysid is the FCU's GCS sysid; ``failsafe`` only mirrors what the FCU reports;
 from __future__ import annotations
 
 import math
-import os
 import re
 import threading
 import time
@@ -52,6 +51,7 @@ from SpiriSynq.example_types.position import (
 from SpiriSynq.link import Link
 from SpiriSynq.remote_callables import RpcException, encode_parameters
 
+from spiri_mav.dialect import mavlink
 from spiri_mav.geoid import geoid_height
 from spiri_mav.gimbal import Gimbal, RangefinderDetection
 from spiri_mav.hud import (
@@ -73,15 +73,6 @@ from spiri_mav.robot import (
     Velocity,
 )
 
-# MAVLink 2: we rely on its extension fields (GPS_RAW_INT accuracies and
-# alt_ellipsoid, COMMAND_ACK.target_system, ...). pymavlink picks v1 or v2 from
-# MAVLINK20 when mavutil is first imported, which may have happened already.
-if mavutil.mavlink.WIRE_PROTOCOL_VERSION != "2.0":
-    os.environ["MAVLINK20"] = "1"
-    mavutil.set_dialect(mavutil.current_dialect)
-
-mavlink = mavutil.mavlink
-
 HEARTBEAT_TIMEOUT = 3.0  # s without an autopilot heartbeat before `connected` drops
 GCS_TIMEOUT = 5.0  # s without another GCS's heartbeat before `gcs_seen` drops
 COMMAND_TIMEOUT = 1.5  # s to wait for a COMMAND_ACK, per attempt
@@ -101,7 +92,7 @@ STREAMS = {
     mavlink.MAVLINK_MSG_ID_GIMBAL_MANAGER_STATUS: 1,
     mavlink.MAVLINK_MSG_ID_CAMERA_FOV_STATUS: 1,
 }
-# DISTANCE_SENSOR, in Hz, when a gimbal has a rangefinder.
+# DISTANCE_SENSOR, in Hz, when a gimbal has a rangefinder; and DISTANCE_SENSOR_MOUNT.
 RANGEFINDER_HZ = 10
 RANGEFINDER_TIMEOUT = 2.0  # s without a reading before a gimbal's goes to None
 # The robot's report of itself: how long it holds without a position, and
@@ -471,6 +462,7 @@ class MavRobot(Robot):
     # report, and when it last read.
     _spots: dict[int, RangefinderDetection] = field(default_factory=dict)
     _last_range: dict[int, float] = field(default_factory=dict)
+    _mount_range_ambiguous: bool = False  # warned that it's no one gimbal's
     # Config, as MAVLink doesn't report them; None leaves them unknown. ± deg
     # off a gimbal's axis, and ± (m, m per m of distance) for a rangefinder.
     _pointing_accuracy: float | None = None
@@ -674,33 +666,56 @@ class MavRobot(Robot):
         gimbal.handle(msg)
 
     def _on_distance_sensor(self, msg) -> None:
+        # ArduPilot reports a rangefinder as fixed to the airframe: config says
+        # which is a gimbal's.
+        for device_id, sensor_id in self._gimbal_rangefinders.items():
+            if sensor_id == msg.id:
+                self._on_range(device_id, msg, f"DISTANCE_SENSOR {msg.id}")
+
+    def _on_distance_sensor_mount(self, msg) -> None:
+        # Spiri's firmware's gimbal rangefinder. It doesn't say which gimbal's,
+        # so it's the robot's only one's; with more, there's no telling.
+        if len(self._gimbals) != 1:
+            if self._gimbals and not self._mount_range_ambiguous:
+                self._mount_range_ambiguous = True
+                logger.warning(
+                    "DISTANCE_SENSOR_MOUNT with {} gimbals: can't tell whose",
+                    len(self._gimbals),
+                )
+            return
+        [device_id] = self._gimbals
+        self._on_range(device_id, msg, f"DISTANCE_SENSOR_MOUNT {msg.id}")
+
+    def _on_range(self, device_id: int, msg, source: str) -> None:
+        """Gimbal *device_id*'s rangefinder read *msg*, a DISTANCE_SENSOR or _MOUNT."""
+        if device_id not in self._gimbals:
+            return
+        spot = self._spots.get(device_id) or self._add_rangefinder(device_id, source)
+        if spot is None:
+            return
         # Centimetres. ArduPilot sends a reading past either limit as it is,
         # or saturated at UINT16_MAX when nothing came back.
-        for device_id, sensor_id in self._gimbal_rangefinders.items():
-            if sensor_id != msg.id or device_id not in self._gimbals:
-                continue
-            spot = self._spots.get(device_id) or self._add_rangefinder(device_id)
-            if spot is None:
-                continue
-            if msg.current_distance < msg.min_distance:
-                status, distance = "near", None
-            elif msg.current_distance > msg.max_distance:
-                status, distance = "far", None
-            else:
-                status, distance = "ok", msg.current_distance / 100
-            if distance is not None and self._range_accuracy is not None:
-                fixed, per_m = self._range_accuracy
-                # To a decimetre, so it's sent only when it changes by that.
-                spot.range_accuracy = round(fixed + per_m * distance, 1)
-            spot.set_reading(
-                status,
-                distance,
-                msg.min_distance / 100,
-                msg.max_distance / 100,
-            )
-            self._last_range[device_id] = time.monotonic()
+        if msg.current_distance < msg.min_distance:
+            status, distance = "near", None
+        elif msg.current_distance > msg.max_distance:
+            status, distance = "far", None
+        else:
+            status, distance = "ok", msg.current_distance / 100
+        if distance is not None and self._range_accuracy is not None:
+            fixed, per_m = self._range_accuracy
+            # To a decimetre, so it's sent only when it changes by that.
+            spot.range_accuracy = round(fixed + per_m * distance, 1)
+        spot.set_reading(
+            status,
+            distance,
+            msg.min_distance / 100,
+            msg.max_distance / 100,
+        )
+        self._last_range[device_id] = time.monotonic()
 
-    def _add_rangefinder(self, device_id: int) -> RangefinderDetection | None:
+    def _add_rangefinder(
+        self, device_id: int, source: str
+    ) -> RangefinderDetection | None:
         """Gimbal *device_id*'s rangefinder, now that its sensor has reported.
 
         Config says which sensor is whose, but only a report says there is
@@ -721,11 +736,7 @@ class MavRobot(Robot):
         self._hud.append(
             rangefinder_widget(gimbal.synq_topic, device_id, self._instruments)
         )
-        logger.info(
-            "Gimbal {} has a rangefinder, DISTANCE_SENSOR {}",
-            device_id,
-            self._gimbal_rangefinders[device_id],
-        )
+        logger.info("Gimbal {} has a rangefinder, {}", device_id, source)
         return spot
 
     def _on_camera_message(self, msg) -> None:
@@ -1005,7 +1016,9 @@ class MavRobot(Robot):
             self._conn.mav.param_request_read_send(
                 self.target_sysid, self.target_compid, name.encode(), -1
             )
+        # Spiri's firmware's, whatever the config; others refuse it.
         streams = dict(STREAMS)
+        streams[mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR_MOUNT] = RANGEFINDER_HZ
         if self._gimbal_rangefinders:
             streams[mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR] = RANGEFINDER_HZ
         for message_id, hz in streams.items():

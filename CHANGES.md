@@ -4,6 +4,13 @@
 
 ### Features
 
+- **`DISTANCE_SENSOR_MOUNT`**: Spiri's firmware's gimbal rangefinder (message 14000, from
+  itsOverFactory/mavlink), `DISTANCE_SENSOR` with 32-bit distances, so a laser's 1200 m
+  fit. SpiriMav adds it to pymavlink's dialect (`spiri_mav.dialect`, which also settles
+  MAVLink 2), streams it at 10 Hz whatever the config (other firmware refuses), and takes
+  it as the robot's gimbal's rangefinder when it has exactly one gimbal, as the message
+  doesn't say which. Its `quaternion` is ignored: the firmware sends the gimbal's own
+  attitude, which the gimbal's pose already has.
 - **Detections (SpiriDetect)**: SpiriMav depends on `spiridetect>=0.1.0` and publishes the
   robot's report of itself at `<host>/detections/self`: a SpiriDetect `Detection` at the
   robot's origin, so its pose is the robot's, with its ground `speed` and `course` (None
@@ -80,6 +87,9 @@
 
 ### Tests
 
+- `DISTANCE_SENSOR_MOUNT`: a frame captured from a Mu's flight controller decodes; readings
+  past 655 m place the only gimbal's spot; with two gimbals they're dropped; it's streamed
+  unconfigured.
 - `detections/self`: where it is, its type by vehicle, speed and course, and that it
   reaches mirrors. The rangefinder tests follow it to SpiriDetect's fields and topic;
   `beam_accuracy`'s test went with it to SpiriDetect.
