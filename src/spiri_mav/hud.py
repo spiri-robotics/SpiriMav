@@ -381,8 +381,6 @@ RANGEFINDER_SVG = (
 {% set r = ns.r %}
 {% if r and r.status == "ok" %}{% set reading = r.distance ~ " m" %}
 {%- if r.accuracy is not none %}{% set reading = reading ~ " ±" ~ r.accuracy %}{% endif %}
-{%- elif r and r.status == "far" %}{% set reading = "> " ~ (r.max | round | int) ~ " m" %}
-{%- elif r and r.status == "near" %}{% set reading = "< " ~ r.min ~ " m" %}
 {%- else %}{% set reading = "no reading" %}{% endif %}
 {% set place = r.place if r and r.place else "" %}
 {% set box = ([reading | length, place | length] | max) * 10.6 + 12 %}

@@ -693,20 +693,15 @@ class MavRobot(Robot):
         spot = self._spots.get(device_id) or self._add_rangefinder(device_id, source)
         if spot is None:
             return
-        # Centimetres. ArduPilot sends a reading past either limit as it is,
-        # or saturated at UINT16_MAX when nothing came back.
-        if msg.current_distance < msg.min_distance:
-            status, distance = "near", None
-        elif msg.current_distance > msg.max_distance:
-            status, distance = "far", None
-        else:
-            status, distance = "ok", msg.current_distance / 100
-        if distance is not None and self._range_accuracy is not None:
+        # Centimetres, taken as they come: the firmware filters its readings,
+        # and min/max are the sensor's rating, not a test for them.
+        distance = msg.current_distance / 100
+        if self._range_accuracy is not None:
             fixed, per_m = self._range_accuracy
             # To a decimetre, so it's sent only when it changes by that.
             spot.range_accuracy = round(fixed + per_m * distance, 1)
         spot.set_reading(
-            status,
+            "ok",
             distance,
             msg.min_distance / 100,
             msg.max_distance / 100,

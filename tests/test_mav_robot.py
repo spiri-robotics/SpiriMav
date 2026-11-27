@@ -988,17 +988,13 @@ def test_rangefinder_reading_places_the_spot(ranged):
     assert spot.mount.offset == Offset(x=12.34)
 
 
-@pytest.mark.parametrize(
-    "current, status",
-    [(9, "near"), (65535, "far"), (20, "ok"), (65000, "ok")],
-)
-def test_rangefinder_out_of_range(ranged, current, status):
+@pytest.mark.parametrize("current", [9, 20, 65000, 65535])
+def test_rangefinder_readings_are_taken_as_they_come(ranged, current):
+    # The firmware filters its readings: min and max are only the rating.
     ranged.handle(distance_sensor(current))
     spot = ranged._spots[154]
-    assert spot.status == status
-    # No return, no range: a bearing alone.
-    assert (spot.range is None) == (status != "ok")
-    assert spot.mount is not None
+    assert (spot.status, spot.range) == ("ok", current / 100)
+    assert spot.mount.offset == Offset(x=current / 100)
 
 
 def test_rangefinder_time_updates_once_a_second(ranged, monkeypatch):
@@ -1092,8 +1088,8 @@ def test_mount_rangefinder_is_the_only_gimbals(connected):
     assert gimbal.rangefinder == Link.to(spot)
     assert (spot.status, spot.range, spot.min, spot.max) == ("ok", 800.0, 5.0, 1200.0)
     assert spot.mount.offset == Offset(x=800.0)
-    connected.handle(distance_sensor_mount(0))  # no return
-    assert (spot.status, spot.range) == ("near", None)
+    connected.handle(distance_sensor_mount(450))  # a real Mu's, under its 5 m rating
+    assert (spot.status, spot.range) == ("ok", 4.5)
 
 
 def test_mount_rangefinder_needs_one_gimbal(connected):

@@ -36,8 +36,8 @@ from spiri_mav.robot import CommandRefused
 # own, and staleness needs no finer.
 TIME_PERIOD = 1.0  # s
 
-# "near": something closer than ``min``; "far": nothing within ``max``.
-RangeStatus = Literal["ok", "near", "far"]
+# "ok": a reading. The firmware filters its own, so there's no other.
+RangeStatus = Literal["ok"]
 
 
 @dataclass
@@ -48,11 +48,11 @@ class RangefinderDetection(BearingDetection):
     x axis, the way it points. With a return, ``range`` is the reading and
     ``pose`` the spot, its accuracy the whole tree's: the beam's
     (``range_accuracy`` along it, ``bearing_accuracy`` across it, the gimbal's
-    pointing accuracy), the gimbal's and the robot's above it. Something too
-    near or nothing within reach is a bearing without a range: the ``ray``,
-    no ``pose``. A silent rangefinder has neither.
+    pointing accuracy), the gimbal's and the robot's above it. A silent
+    rangefinder has neither.
 
-    ``status`` says which, and ``min``/``max`` are what the sensor can measure.
+    ``status`` is "ok" with a reading and None while silent, and
+    ``min``/``max`` are what the sensor is rated to measure.
     ``time`` is the latest reading's to within ``TIME_PERIOD``.
     """
 
@@ -67,7 +67,7 @@ class RangefinderDetection(BearingDetection):
         min: float | None = None,
         max: float | None = None,
     ) -> None:
-        """Take a reading: *distance* m along the gimbal's axis when *status* is "ok"."""
+        """Take a reading: *distance* m along the gimbal's axis, or None for silence."""
         self.status, self.min, self.max = status, min, max
         if status is None:
             self.clear()
@@ -75,7 +75,7 @@ class RangefinderDetection(BearingDetection):
         now = time.time()
         if self.time is None or now - self.time >= TIME_PERIOD:
             self.time = now
-        self.set_bearing(0.0, 0.0, distance if status == "ok" else None)
+        self.set_bearing(0.0, 0.0, distance)
 
 
 @dataclass

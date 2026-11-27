@@ -269,7 +269,7 @@ TROUBLE = dict(
             "yaw": None,
             "yaw_lock": True,
             "range": {
-                "status": "far",
+                "status": None,  # silent
                 "distance": None,
                 "min": 0.2,
                 "max": 650.0,
@@ -350,7 +350,7 @@ def test_widgets_show_what_they_read(widgets):
 def test_rangefinder_widget_shows_the_reading(widgets):
     range_hud = widgets["gimbal1_range_hud"].svg_template
     assert texts(render(range_hud, FLYING)) == ["123.4 m ±1.3", "44.64700 -63.58000"]
-    assert texts(render(range_hud, TROUBLE)) == ["> 650 m"]
+    assert texts(render(range_hud, TROUBLE)) == ["no reading"]
     assert texts(render(range_hud, UNKNOWN)) == ["no reading"]
 
 

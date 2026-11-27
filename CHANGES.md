@@ -56,10 +56,9 @@
   SpiriDetect's `BearingDetection` along the gimbal's x axis, at
   `<host>/detections/rangefinder/gimbal<id>` (`Gimbal.rangefinder` links to it). With a
   return, `range` is the reading and its pose is the spot, with coordinates like any
-  frame. It also carries `status` (`ok`, `near`, `far`), the sensor's `min` and `max`, the
+  frame. It also carries `status` (`ok`), the sensor's rated `min` and `max`, the
   beam's accuracies (`range_accuracy` to 0.1 m, so it's sent only when it changes by
-  that), the reading's `time` (to within a second), and `stale_after` 2 s. Too near or too far, it
-  is a bearing without a range: a `ray`, no pose. After 2 s without a reading its status
+  that), the reading's `time` (to within a second), and `stale_after` 2 s. After 2 s without a reading its status
   goes to `None` and it's cleared. Readings come from `DISTANCE_SENSOR` (streamed at 10 Hz), since ArduPilot
   reports a rangefinder only as fixed to the airframe; which sensor id is which gimbal's
   is config, `SPIRI_MAV_GIMBAL_RANGEFINDERS`, e.g. `{"1": 0}`. Config only says whose a
@@ -84,6 +83,10 @@
   streams `DISTANCE_SENSOR` at 10 Hz whatever the config, not only when a gimbal's
   rangefinder is configured; an airframe rangefinder that isn't configured as a gimbal's is
   still ignored.
+- **Rangefinder readings are taken as they come.** The firmware filters its own, so a
+  reading outside the sensor's rated `min`/`max` (a Mu's 4.5 m under its laser's 5 m) is
+  no longer dropped as `near` or `far`: those statuses, and the HUD's `< min`/`> max`, are
+  gone.
 
 - Heights are above the WGS84 ellipsoid even when the GPS doesn't report its geoid separation
   (`GPS_RAW_INT.alt_ellipsoid`; ArduPilot SITL doesn't): the separation then comes from EGM96, a
