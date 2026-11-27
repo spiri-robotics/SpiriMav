@@ -54,6 +54,17 @@ class Battery:
     state: BatteryState = "unknown"
 
 
+def _verbatim(func):
+    """Serve an RPC on ``@<name>``, a key zenoh's wildcards don't match.
+
+    SpiriSynq keys the queryable, the client's selector and the schema entry
+    all off the wrapped function's ``__name__``; the Python attribute keeps
+    its plain name, so callers still write ``robot.arm(...)``.
+    """
+    func.__name__ = f"@{func.__name__}"
+    return func
+
+
 class CommandRefused(RuntimeError):
     """The vehicle rejected, or never acknowledged, a command."""
 
@@ -83,8 +94,17 @@ class Robot(Position):
     batteries: tuple[Battery, ...] = ()
 
     @remote_method()
-    def arm(self, force: bool = False) -> None:
-        """Arm the motors; *force* skips the autopilot's pre-arm checks."""
+    @_verbatim
+    def arm(self, *, really_arm: bool = False, force: bool = False) -> None:
+        """Arm the motors if *really_arm*; *force* skips the autopilot's pre-arm checks.
+
+        Served on ``<robot>/@arm``: zenoh's ``*`` and ``**`` don't match a key
+        chunk starting with ``@``, so a wildcard query (``**``, ``host/*/*``)
+        never reaches it. *really_arm* guards the exact key as well, so a
+        caller that queries it with no parameters doesn't arm either.
+        """
+        if not really_arm:
+            raise CommandRefused("arm needs really_arm=True")
         self._do_arm(True, force)
 
     @remote_method()

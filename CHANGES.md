@@ -77,6 +77,12 @@
 
 ### Fixes
 
+- **Wildcard queries can't arm the robot.** A zenoh `get` on `**` (a discovery sweep) ran
+  every RPC it matched, `arm` among them, with default arguments. `arm` is now served on
+  `<robot>/@arm`, which zenoh's `*` and `**` don't match. It also refuses unless called
+  with `really_arm=True`, and its arguments are keyword-only: `robot.arm(really_arm=True)`.
+  **Breaking:** a bare `robot.arm()` now raises `CommandRefused`.
+
 - **A Mu's gimbal rangefinder reaches SpiriMav.** Spiri's firmware sends
   `DISTANCE_SENSOR_MOUNT` only along with `DISTANCE_SENSOR`, and refuses an interval for it
   of its own, so on a port whose streams are SpiriMav's alone it never came. SpiriMav now
@@ -99,6 +105,8 @@
 
 ### Tests
 
+- `arm` refuses without `really_arm=True` and sends nothing. `**` and `<robot>/*` queries
+  carrying `really_arm=true` don't reach it, while a mirror's `arm(really_arm=True)` does.
 - `DISTANCE_SENSOR_MOUNT`: a frame captured from a Mu's flight controller decodes; readings
   past 655 m place the only gimbal's spot; with two gimbals they're dropped; it's streamed
   unconfigured.

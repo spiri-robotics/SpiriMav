@@ -76,3 +76,9 @@ MAVLink-specific `MavRobot`.
   ...), never as field writes from mirrors: RPCs are acknowledged and can
   refuse. They act alongside QGC with no arbitration, as two GCSs on one
   vehicle normally do; QGC is the operator's override.
+- **Arming takes deliberate intent.** A zenoh `get` on `**` or `host/*/*`
+  calls every queryable it matches, and an RPC with default arguments runs
+  on a bare query, so a discovery sweep could arm the vehicle. `arm` is
+  therefore served on `<robot>/@arm`: zenoh's wildcards never match a chunk
+  starting with `@`. It also refuses unless called with `really_arm=True`,
+  so even an exact query with no parameters doesn't arm.

@@ -455,7 +455,7 @@ def test_mirror_sees_the_generic_robot(connected, synq_session):
 
 def test_arm_waits_for_ack(connected):
     responder = ack_when_sent(connected, mavlink.MAV_CMD_COMPONENT_ARM_DISARM)
-    connected.arm()
+    connected.arm(really_arm=True)
     responder.join()
     [cmd] = [
         m
@@ -465,12 +465,39 @@ def test_arm_waits_for_ack(connected):
     assert (cmd.target_system, cmd.param1, cmd.param2) == (1, 1, 0)
 
 
+def test_arm_needs_really_arm(connected):
+    with pytest.raises(CommandRefused, match="really_arm"):
+        connected.arm()
+    assert [
+        m
+        for m in connected._conn.of_type("COMMAND_LONG")
+        if m.command == mavlink.MAV_CMD_COMPONENT_ARM_DISARM
+    ] == []
+
+
+def test_arm_is_out_of_reach_of_wildcards(connected, synq_session):
+    responder = ack_when_sent(connected, mavlink.MAV_CMD_COMPONENT_ARM_DISARM)
+    path = connected.synq_absolute_path
+    zs = synq_session.zenoh_session
+    for selector in ("**?really_arm=true", f"{path}/*?really_arm=true"):
+        list(zs.get(selector, timeout=0.5))
+    assert not [
+        m
+        for m in connected._conn.of_type("COMMAND_LONG")
+        if m.command == mavlink.MAV_CMD_COMPONENT_ARM_DISARM
+    ]
+    # Through a mirror, by its own key, it arms.
+    mirror = Robot.from_topic(path)
+    mirror.arm(really_arm=True)
+    responder.join()
+
+
 def test_refusal_raises(connected):
     responder = ack_when_sent(
         connected, mavlink.MAV_CMD_COMPONENT_ARM_DISARM, mavlink.MAV_RESULT_DENIED
     )
     with pytest.raises(CommandRefused, match="denied"):
-        connected.arm()
+        connected.arm(really_arm=True)
     responder.join()
 
 
@@ -694,7 +721,7 @@ def test_another_gcs_pointing_by_angle_ends_the_roi(connected):
 
 def test_commands_need_a_connection(robot):
     with pytest.raises(CommandRefused, match="not connected"):
-        robot.arm()
+        robot.arm(really_arm=True)
 
 
 def test_gcs_sysid_conflict_stops_heartbeat_and_commands(connected):
@@ -712,7 +739,7 @@ def test_gcs_sysid_conflict_stops_heartbeat_and_commands(connected):
     connected.tick(now=time.monotonic() + 2)
     assert connected._conn.of_type("HEARTBEAT") == []
     with pytest.raises(CommandRefused, match="GCS sysid"):
-        connected.arm()
+        connected.arm(really_arm=True)
 
 
 # ── Gimbal ───────────────────────────────────────────────────────────────────
