@@ -1,6 +1,6 @@
 [project]
 name = "SpiriMav"
-version = "0.1.0"
+version = "0.2.0"
 description = "MAVLink vehicle bridge for SpiriSynq: a companion-computer GCS that mirrors autopilot state"
 readme = "README.md"
 requires-python = ">=3.13"
