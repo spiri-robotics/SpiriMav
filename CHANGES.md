@@ -78,6 +78,13 @@
 
 ### Fixes
 
+- **A Mu's gimbal rangefinder reaches SpiriMav.** Spiri's firmware sends
+  `DISTANCE_SENSOR_MOUNT` only along with `DISTANCE_SENSOR`, and refuses an interval for it
+  of its own, so on a port whose streams are SpiriMav's alone it never came. SpiriMav now
+  streams `DISTANCE_SENSOR` at 10 Hz whatever the config, not only when a gimbal's
+  rangefinder is configured; an airframe rangefinder that isn't configured as a gimbal's is
+  still ignored.
+
 - Heights are above the WGS84 ellipsoid even when the GPS doesn't report its geoid separation
   (`GPS_RAW_INT.alt_ellipsoid`; ArduPilot SITL doesn't): the separation then comes from EGM96, a
   15' grid shipped in the package (`spiri_mav.geoid`), rather than being taken as 0. Before, SITL

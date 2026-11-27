@@ -1024,17 +1024,15 @@ def test_rangefinder_goes_silent(ranged):
     assert spot.status is None and spot.mount is None and spot.range is None
 
 
-def test_rangefinder_is_streamed_only_when_configured(robot, ranged):
-    def streamed(r):
-        return {
-            int(m.param1)
-            for m in r._conn.of_type("COMMAND_LONG")
-            if m.command == mavlink.MAV_CMD_SET_MESSAGE_INTERVAL
-        }
-
+def test_rangefinder_is_streamed_unconfigured(robot):
+    # Spiri's firmware sends DISTANCE_SENSOR_MOUNT only along with
+    # DISTANCE_SENSOR, so it's asked for though no gimbal's is configured.
     robot.handle(heartbeat())
-    assert mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR not in streamed(robot)
-    assert mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR in streamed(ranged)
+    assert mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR in {
+        int(m.param1)
+        for m in robot._conn.of_type("COMMAND_LONG")
+        if m.command == mavlink.MAV_CMD_SET_MESSAGE_INTERVAL
+    }
 
 
 def test_rangefinder_mount_message_is_streamed_unconfigured(robot):

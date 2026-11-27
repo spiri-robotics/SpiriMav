@@ -1016,11 +1016,12 @@ class MavRobot(Robot):
             self._conn.mav.param_request_read_send(
                 self.target_sysid, self.target_compid, name.encode(), -1
             )
-        # Spiri's firmware's, whatever the config; others refuse it.
+        # Rangefinders, whatever the config. Spiri's firmware sends its
+        # DISTANCE_SENSOR_MOUNT only along with DISTANCE_SENSOR, refusing an
+        # interval for it of its own; other firmware refuses it outright.
         streams = dict(STREAMS)
+        streams[mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR] = RANGEFINDER_HZ
         streams[mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR_MOUNT] = RANGEFINDER_HZ
-        if self._gimbal_rangefinders:
-            streams[mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR] = RANGEFINDER_HZ
         for message_id, hz in streams.items():
             self._send_command_long(
                 mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, (message_id, 1e6 / hz)
